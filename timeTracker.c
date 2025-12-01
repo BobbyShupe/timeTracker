@@ -112,27 +112,52 @@ void ApplyInputsToSelected(void) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Input Handling
 // ─────────────────────────────────────────────────────────────────────────────
-void HandlePanningAndZooming(void) {
+void HandlePanningAndZooming(void)
+{
     Vector2 mouse = GetMousePosition();
-    double secs_per_pixel = (365.25 * 86400) / tracker.pixels_per_year;
+    const float left = 100.0f;
 
+    double secs_per_pixel = (365.25 * 86400.0) / tracker.pixels_per_year;
+
+    // ───── SMOOTH PANNING (Right drag) ─────
     static Vector2 last_mouse = {0};
-    if (IsMouseButtonDown(MOUSE_RIGHT_BUTTON)) {
-        if (last_mouse.x || last_mouse.y) {
-            Vector2 delta = {mouse.x - last_mouse.x, mouse.y - last_mouse.y};
-            tracker.view_start -= (time_t)(delta.x * secs_per_pixel);
+    if (IsMouseButtonDown(MOUSE_RIGHT_BUTTON))
+    {
+        if (last_mouse.x != 0.0f)
+        {
+            float delta_x = mouse.x - last_mouse.x;
+            tracker.view_start -= (time_t)(delta_x * secs_per_pixel);
         }
-        last_mouse = mouse; HideCursor();
-    } else { last_mouse = (Vector2){0}; ShowCursor(); }
+        last_mouse = mouse;
+        HideCursor();
+    }
+    else
+    {
+        last_mouse = (Vector2){0};
+        ShowCursor();
+    }
 
-    float wheel = GetMouseWheelMove();
-    if (wheel != 0) {
-        tracker.pixels_per_year *= (wheel > 0 ? 1.6 : 0.625);
-        tracker.pixels_per_year = fmax(20.0, fmin(tracker.pixels_per_year, 500000.0));
+    // ───── PRECISE, DIRECT, NO-GLIDE ZOOM (exactly what you asked for) ─────
+    float wheel = GetMouseWheelMoveV().y;
+    if (wheel == 0.0f) wheel = GetMouseWheelMove();  // fallback
 
-        double world_time_at_mouse = tracker.view_start + (mouse.x - 100) * secs_per_pixel;
-        double new_offset = (mouse.x - 100) / tracker.pixels_per_year * 365.25*86400;
-        tracker.view_start = (time_t)(world_time_at_mouse - new_offset);
+    if (wheel != 0.0f)
+    {
+        // Time under mouse cursor — stays perfectly fixed
+        time_t time_under_mouse = tracker.view_start + (time_t)((mouse.x - left) * secs_per_pixel);
+
+        // Precise, predictable zoom steps
+        double zoom_factor = (wheel > 0) ? 1.25 : 0.80;   // 25% in / 20% out → feels perfect
+
+        tracker.pixels_per_year *= zoom_factor;
+
+        // Hard, safe limits
+        if (tracker.pixels_per_year < 20.0)     tracker.pixels_per_year = 20.0;
+        if (tracker.pixels_per_year > 2000000.0) tracker.pixels_per_year = 2000000.0;
+
+        // Re-center exactly under mouse
+        secs_per_pixel = (365.25 * 86400.0) / tracker.pixels_per_year;
+        tracker.view_start = time_under_mouse - (time_t)((mouse.x - left) * secs_per_pixel);
     }
 }
 
@@ -149,8 +174,10 @@ void HandleSelectionAndDragging(void) {
             float w = (float)(e->duration_years * tracker.pixels_per_year);
             if (w < 4.0f) w = 4.0f;
 
-            float y = 270.0f + i * 72.0f;                     // ← SAME AS DrawEvents() !!
-            Rectangle rec = { x, y, w, 50.0f };
+			const float start_y = 300.0f;
+			const float row_height = 36.0f;
+			float y = start_y + i * row_height;                     // ← SAME AS DrawEvents() !!
+            Rectangle rec = { x, y, w, 28.0f };
 
             if (CheckCollisionPointRec(mouse, rec)) {
                 selected = i;
@@ -207,15 +234,31 @@ void HandleSelectionAndDragging(void) {
 }
 
 void HandleKeyboardShortcuts(void) {
-    if (IsKeyPressed(KEY_ENTER) && selected == -1 && strlen(name_input.text) && strlen(start_input.text) && strlen(end_input.text)) {
-        time_t s = ParseDateTime(start_input.text);
-        time_t e = ParseDateTime(end_input.text);
-        if (s && e > s && tracker.count < MAX_ENTRIES) {
+    if (IsKeyPressed(KEY_ENTER) && selected == -1) {
+        time_t s = 0, e = 0;
+
+        // Use current text if valid, otherwise fall back to today
+        if (strlen(start_input.text) > 0) s = ParseDateTime(start_input.text);
+        if (s == 0) {
+            s = time(NULL);
+            struct tm *tm = localtime(&s);
+            tm->tm_hour = tm->tm_min = tm->tm_sec = 0;
+            s = mktime(tm);
+        }
+
+        if (strlen(end_input.text) > 0) e = ParseDateTime(end_input.text);
+        if (e == 0 || e <= s) {
+            e = s + 365*86400;  // default: +1 year
+        }
+
+        if (tracker.count < MAX_ENTRIES) {
             Entry *en = &tracker.entries[tracker.count++];
             strncpy(en->name, name_input.text[0] ? name_input.text : "Untitled", MAX_NAME-1);
-            en->start = s; en->end = e;
+            en->start = s;
+            en->end   = e;
             en->duration_years = difftime(e, s) / (365.25*86400);
             en->color = (Color){GetRandomValue(90,230), GetRandomValue(90,230), GetRandomValue(110,240), 255};
+
             selected = tracker.count - 1;
             SyncInputsToSelected();
             last_selected = -2;
@@ -243,7 +286,7 @@ void DrawTimelineGrid(void)
 {
     const float left       = 100.0f;
     const float right      = GetScreenWidth() - 50.0f;
-    const float baseline_y = 180.0f;
+    const float baseline_y = 260.0f;
 
     double secs_per_pixel = (365.25 * 86400.0) / tracker.pixels_per_year;
     double view_seconds   = (right - left) * secs_per_pixel;
@@ -251,39 +294,75 @@ void DrawTimelineGrid(void)
 
     DrawLineEx((Vector2){left, baseline_y}, (Vector2){right, baseline_y},
                3.0f, (Color){90, 90, 140, 255});
+    /* ────────────────────── TODAY LINE ────────────────────── */
+    time_t now = time(NULL);
+    struct tm today = {0};
+    localtime_r(&now, &today);
+    today.tm_hour = today.tm_min = today.tm_sec = 0;
+    today.tm_isdst = -1;                      // ← also here
+    time_t today_midnight = mktime(&today);
 
-    /* ────────────────────── YEARS ────────────────────── */
+    double secs = difftime(today_midnight, tracker.view_start);
+    float tx = left + (float)(secs / secs_per_pixel);
+
+    if (tx >= left - 200 && tx <= right + 200)
+    {
+        DrawLineEx((Vector2){tx, baseline_y - 60}, (Vector2){tx, GetScreenHeight() - 50},
+                   4.5f, RED);
+        DrawCircle(tx, baseline_y, 10, RED);
+        DrawCircle(tx, baseline_y, 7, (Color){40,10,10,255});
+        DrawTextEx(font, "TODAY", (Vector2){tx + 14, baseline_y + 40}, 28, 1.3f, RED);
+    }
+    /* ────────────────────── YEARS — EVERY YEAR, SAME HEIGHT, NEVER TOUCH TICKS ────────────────────── */
     if (tracker.pixels_per_year > 30.0)
     {
-        struct tm *v = SafeLocalTime(&tracker.view_start);
-        int year = v->tm_year + 1900;
-        int end_year = SafeLocalTime(&view_end)->tm_year + 1900 + 1;
+        // Start far enough back to never miss the first visible year
+        struct tm start_tm = {0};
+        localtime_r(&tracker.view_start, &start_tm);
+        start_tm.tm_year -= 50;      // huge safety buffer
+        start_tm.tm_mon = 0;
+        start_tm.tm_mday = 1;
+        start_tm.tm_isdst = -1;
+        mktime(&start_tm);
+        int year = start_tm.tm_year + 1900;
+
+        int end_year = SafeLocalTime(&view_end)->tm_year + 1900 + 50;
 
         for (; year <= end_year; ++year)
         {
-            struct tm tmp = {0};
-            tmp.tm_year = year - 1900;
-            tmp.tm_mon  = 0;
-            tmp.tm_mday = 1;
-            tmp.tm_hour = tmp.tm_min = tmp.tm_sec = 0;
-            tmp.tm_isdst = -1;               // ← CRITICAL
-            time_t t = mktime(&tmp);
-            if (t < tracker.view_start || t > view_end) continue;
+            struct tm ytm = {0};
+            ytm.tm_year = year - 1900;
+            ytm.tm_mon  = 0;
+            ytm.tm_mday = 1;
+            ytm.tm_isdst = -1;
+            time_t yt = mktime(&ytm);
 
-            double secs = difftime(t, tracker.view_start);
+            double secs = difftime(yt, tracker.view_start);
             float x = left + (float)(secs / secs_per_pixel);
 
-            if (x >= left - 150 && x <= right + 150)
-            {
-                DrawLineEx((Vector2){x, baseline_y - 32}, (Vector2){x, baseline_y + 22}, 3.5f, WHITE);
-                char buf[16];
-                snprintf(buf, sizeof(buf), "%d", year);
-                DrawTextPro(font, buf, (Vector2){x + 14, baseline_y - 38},
-                            (Vector2){0,0}, 90.0f, 30, 1.5f, WHITE);
-            }
+            // Draw only if near screen
+            if (x < left - 600 || x > right + 600) continue;
+
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%d", year);
+
+            // 1. Tick — short and clean
+            DrawLineEx((Vector2){x, baseline_y - 28},
+                       (Vector2){x, baseline_y + 28}, 4.0f, WHITE);
+
+            // 2. Label — ALL at exactly the same Y level, far above everything
+            const float LABEL_Y = baseline_y - 160.0f;   // ← fixed height for all years
+
+            DrawTextPro(font, buf,
+                        (Vector2){x + 16, LABEL_Y},
+                        (Vector2){0, 0},
+                        90.0f,       // rotated
+                        36,          // big and bold
+                        1.5f,
+                        WHITE);
         }
     }
-
+                            
     /* ────────────────────── MONTHS ────────────────────── */
     if (tracker.pixels_per_year > 250.0)
     {
@@ -383,68 +462,65 @@ void DrawTimelineGrid(void)
             t = mktime(&tmp);
         }
     }
-
-    /* ────────────────────── TODAY LINE ────────────────────── */
-    time_t now = time(NULL);
-    struct tm today = {0};
-    localtime_r(&now, &today);
-    today.tm_hour = today.tm_min = today.tm_sec = 0;
-    today.tm_isdst = -1;                      // ← also here
-    time_t today_midnight = mktime(&today);
-
-    double secs = difftime(today_midnight, tracker.view_start);
-    float tx = left + (float)(secs / secs_per_pixel);
-
-    if (tx >= left - 200 && tx <= right + 200)
-    {
-        DrawLineEx((Vector2){tx, baseline_y - 60}, (Vector2){tx, GetScreenHeight() - 50},
-                   4.5f, RED);
-        DrawCircle(tx, baseline_y, 10, RED);
-        DrawCircle(tx, baseline_y, 7, (Color){40,10,10,255});
-        DrawTextEx(font, "TODAY", (Vector2){tx + 14, baseline_y + 40}, 28, 1.3f, RED);
-    }
 }
 
 void DrawEvents(void) {
     Vector2 mouse = GetMousePosition();
 
+    // NEW: compact vertical spacing — was 72, now 36 → twice as many events!
+    const float row_height = 36.0f;
+    const float start_y    = 300.0f;   // start lower to make room above
+
     for (int i = 0; i < tracker.count; i++) {
         Entry *e = &tracker.entries[i];
 
-        // X position and width
         double secs_from_view = difftime(e->start, tracker.view_start);
         float x = 100.0f + (float)(secs_from_view / (365.25*86400.0) * tracker.pixels_per_year);
 
         float w = (float)(e->duration_years * tracker.pixels_per_year);
-        if (w < 4.0f) w = 4.0f;
+        if (w < 5.0f) w = 5.0f;        // minimum visible width
 
-        // Y position — MUST be exactly 270
-        float y = 270.0f + i * 72.0f;
+        float y = start_y + i * row_height;
 
-        Rectangle rec = { x, y, w, 50.0f };
+        Rectangle rec = { x, y, w, 28.0f };   // height 28 instead of 50
 
-        // Hover / selected / dragging colours
+        // Hover / selected colors
         bool hover = CheckCollisionPointRec(mouse, rec);
         Color col = e->color;
         if (dragging == i)     col = Fade(col, 1.4f);
         else if (hover)        col = Fade(col, 0.9f);
+        else if (selected == i) col = Fade(col, 1.1f);
 
         DrawRectangleRec(rec, col);
-        if (selected == i) DrawRectangleLinesEx(rec, 4.0f, YELLOW);
+        if (selected == i) DrawRectangleLinesEx(rec, 3.0f, YELLOW);
 
-        // Edge grab zones
+        // Edge grab handles (only when hovered or dragging)
         if (hover || dragging == i) {
-            DrawRectangle(x, y, EDGE_GRAB, 50, Fade(WHITE, 0.3f));
-            DrawRectangle(x + w - EDGE_GRAB, y, EDGE_GRAB, 50, Fade(WHITE, 0.3f));
+            DrawRectangle(x, y, 16, 28, Fade(WHITE, 0.3f));
+            DrawRectangle(x + w - 16, y, 16, 28, Fade(WHITE, 0.3f));
         }
 
-        // Text
-        DrawTextEx(font, e->name, (Vector2){x + 14, y + 12}, 22, 1, WHITE);
+        // Name — smaller font, clipped smartly
+        const char* name = e->name;
+        if (TextLength(name) * 10 > (unsigned int)w - 40) {
+            // Auto-truncate long names with "..."
+            static char short_name[64];
+            strncpy(short_name, name, 20);
+            short_name[20] = '\0';
+            strcat(short_name, "...");
+            name = short_name;
+        }
+        DrawTextEx(font, name, (Vector2){x + 10, y + 6}, 18, 1, WHITE);
 
+        // Duration in corner
         char dur[32];
-        snprintf(dur, sizeof(dur), "%.2f y", e->duration_years);
-        float tw = MeasureTextEx(font, dur, 20,1).x;
-        DrawTextEx(font, dur, (Vector2){x + w - tw - 14, y + 14}, 20,1, WHITE);
+        if (e->duration_years < 1.0)
+            snprintf(dur, sizeof(dur), "%.1f mo", e->duration_years * 12.0);
+        else
+            snprintf(dur, sizeof(dur), "%.1f y", e->duration_years);
+
+        float tw = MeasureTextEx(font, dur, 16, 1).x;
+        DrawTextEx(font, dur, (Vector2){x + w - tw - 8, y + 8}, 16, 1, Fade(WHITE, 0.9f));
     }
 }
 
@@ -539,14 +615,42 @@ int main(void) {
     font = LoadFontEx("/usr/share/fonts/TTF/DejaVuSans.ttf", 22, NULL, 0);
     if (font.texture.id == 0) font = GetFontDefault();
 
-    tracker.pixels_per_year = 700.0;
-    tracker.view_start = time(NULL) - 20LL * 365 * 86400;
+    // Load saved data first (so we keep any custom zoom/view if saved)
     LoadTracker("timetracker.json");
 
-    InitTextInput(&name_input,   (Rectangle){180, 20, 420, 48}, "");
-    InitTextInput(&start_input,  (Rectangle){680, 20, 200, 48}, "");
-    InitTextInput(&end_input,    (Rectangle){960, 20, 200, 48}, "");
+    // Set default zoom level
+    tracker.pixels_per_year = 700.0;
 
+    // ───── CENTER TODAY ON SCREEN ─────
+    time_t now = time(NULL);   // ← only declared once now
+
+    struct tm today_tm = {0};
+    localtime_r(&now, &today_tm);
+    today_tm.tm_hour = today_tm.tm_min = today_tm.tm_sec = 0;
+    today_tm.tm_isdst = -1;
+    time_t today_midnight = mktime(&today_tm);
+
+    // Calculate how many seconds are visible on screen
+    double visible_pixels = GetScreenWidth() - 150.0;  // left + right margin
+    double visible_seconds = visible_pixels * (365.25 * 86400.0) / tracker.pixels_per_year;
+
+    // Center today exactly in the middle
+    tracker.view_start = today_midnight - (time_t)(visible_seconds / 2.0);
+
+    // Optional: gentle bounds to prevent insane views
+    time_t min_view = today_midnight - 200LL * 365 * 86400;  // max 200 years back
+    time_t max_view = today_midnight + 100LL * 365 * 86400;  // max 100 years forward
+    if (tracker.view_start < min_view) tracker.view_start = min_view;
+    if (tracker.view_start > max_view) tracker.view_start = max_view;
+
+    // Initialize text inputs with today's date
+    char today_str[32];
+    strftime(today_str, sizeof(today_str), "%Y-%m-%d", localtime(&now));
+
+    InitTextInput(&name_input,   (Rectangle){180, 20, 420, 48}, "");
+    InitTextInput(&start_input,  (Rectangle){680, 20, 200, 48}, today_str);
+    InitTextInput(&end_input,    (Rectangle){960, 20, 200, 48}, today_str);
+    
     while (!WindowShouldClose()) {
         HandlePanningAndZooming();
         HandleSelectionAndDragging();
