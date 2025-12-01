@@ -194,11 +194,15 @@ void HandleSelectionAndDragging(void) {
             if (ne > e->start +  + 86400) e->end = ne;
         }
         e->duration_years = difftime(e->end, e->start) / (365.25*86400.0);
+        if (selected == dragging) {
+            SyncInputsToSelected();   // live update while dragging!
+        }
     }
 
     if (IsMouseButtonReleased(MOUSE_LEFT_BUTTON)) {
         dragging = -1;
         drag_mode = 0;
+        if (selected >= 0) SyncInputsToSelected();
     }
 }
 
@@ -213,6 +217,7 @@ void HandleKeyboardShortcuts(void) {
             en->duration_years = difftime(e, s) / (365.25*86400);
             en->color = (Color){GetRandomValue(90,230), GetRandomValue(90,230), GetRandomValue(110,240), 255};
             selected = tracker.count - 1;
+            SyncInputsToSelected();
             last_selected = -2;
         }
     }
@@ -227,86 +232,171 @@ void HandleKeyboardShortcuts(void) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Rendering
 // ─────────────────────────────────────────────────────────────────────────────
-void DrawTimelineGrid(void) {
-    const float left  = 100.0f;
-    const float right = GetScreenWidth() - 50.0f;
-    const float y     = 180.0f;
+// Helper function — replaces the C++ lambda
+static struct tm* SafeLocalTime(const time_t* timep) {
+    static struct tm tm_buf;
+    localtime_r(timep, &tm_buf);  // thread-safe
+    return &tm_buf;
+}
+
+void DrawTimelineGrid(void)
+{
+    const float left        = 100.0f;
+    const float right       = GetScreenWidth() - 50.0f;
+    const float baseline_y  = 180.0f;
 
     double secs_per_pixel = (365.25 * 86400.0) / tracker.pixels_per_year;
     double view_seconds   = (right - left) * secs_per_pixel;
     time_t view_end       = tracker.view_start + (time_t)view_seconds;
 
-    DrawLineEx((Vector2){left, y}, (Vector2){right, y}, 2.0f, (Color){80, 80, 100, 255});
+    // Main timeline line
+    DrawLineEx((Vector2){left, baseline_y}, (Vector2){right, baseline_y},
+               3.0f, (Color){90, 90, 140, 255});
 
-    // ────────────────────────────── YEAR TICKS (fixed) ──────────────────────────────
-    const long long SECS_PER_YEAR = 31557600LL;
+    // ────────────────────── YEARS ──────────────────────
+    if (tracker.pixels_per_year > 30.0)
+    {
+        struct tm *tm = SafeLocalTime(&tracker.view_start);
+        int year = tm->tm_year + 1900;
+        int end_year = SafeLocalTime(&view_end)->tm_year + 1900 + 1;
 
-    struct { int years; double min_px; float tick_h; float font; int dy; } levels[] = {
-        {1000, 1000, 28, 32, -40},
-        { 500,  700, 26, 30, -38},
-        { 100,  400, 22, 28, -36},
-        {  50,  200, 20, 24, -32},
-        {  10,  120, 16, 22, -28},
-        {   5,   70, 14, 20, -26},
-        {   1,   30, 12, 18, -24},
-    };
+        for (; year <= end_year; ++year)
+        {
+            struct tm jan1 = {0};
+            jan1.tm_year = year - 1900;
+            jan1.tm_mon  = 0;
+            jan1.tm_mday = 1;
+            jan1.tm_hour = jan1.tm_min = jan1.tm_sec = 0;
+            jan1.tm_isdst = -1;
 
-    bool drew_year = false;
-    for (int i = 0; i < 7; i++) {
-        double spacing = levels[i].years * tracker.pixels_per_year;
-        if (spacing < levels[i].min_px) continue;
+            time_t t = mktime(&jan1);
+            if (t < tracker.view_start || t > view_end) continue;
 
-        time_t interval = (time_t)levels[i].years * SECS_PER_YEAR;
-        time_t t = tracker.view_start - (tracker.view_start % interval);
-        if (t <= tracker.view_start) t += interval;
+            double secs = difftime(t, tracker.view_start);
+            float x = left + (float)(secs / secs_per_pixel);
 
-        for (; t < view_end + interval; t += interval) {
-            float x = left + (float)(difftime(t, tracker.view_start) / secs_per_pixel);
+            if (x >= left - 150 && x <= right + 150)
+            {
+                DrawLineEx((Vector2){x, baseline_y - 32}, (Vector2){x, baseline_y + 22},
+                           3.5f, WHITE);
 
-            if (x < left - 200 || x > right + 200) continue;
-
-            DrawLineEx((Vector2){x, y - levels[i].tick_h},
-                       (Vector2){x, y + 16}, 3.0f, WHITE);
-
-            struct tm *tm = localtime(&t);
-            if (tm) {
-                char buf[12];
-                snprintf(buf, sizeof(buf), "%d", tm->tm_year + 1900);
-                DrawTextPro(font, buf,
-                            (Vector2){x + 12, y + levels[i].dy},
-                            (Vector2){0,0}, 90.0f, levels[i].font, 1.5f, WHITE);
-            }
-        }
-        drew_year = true;
-        break;                                 // ← only one year level
-    }
-
-    // ─────────────────────────────── MONTHS ──────────────────────────────
-    if (tracker.pixels_per_year > 800.0) {
-        const time_t SECS_PER_MONTH = 2629746LL;
-        time_t t = tracker.view_start - (tracker.view_start % SECS_PER_MONTH);
-        if (t <= tracker.view_start) t += SECS_PER_MONTH;
-
-        for (; t < view_end + SECS_PER_MONTH; t += SECS_PER_MONTH) {
-            float x = left + (float)(difftime(t, tracker.view_start) / secs_per_pixel);
-            if (x < left - 100 || x > right + 100) continue;
-
-            DrawLineEx((Vector2){x, y - 8}, (Vector2){x, y + 10}, 1.8f, Fade(WHITE, 0.6f));
-
-            char buf[8];
-            if (strftime(buf, sizeof(buf), "%b", localtime(&t))) {
-                DrawTextPro(font, buf, (Vector2){x + 8, y - 48}, (Vector2){0,0},
-                            90.0f, 16, 1, Fade(WHITE, 0.9f));
+                char buf[16];
+                snprintf(buf, sizeof(buf), "%d", year);
+                DrawTextPro(font, buf, (Vector2){x + 14, baseline_y - 38},
+                            (Vector2){0,0}, 90.0f, 30, 1.5f, WHITE);
             }
         }
     }
 
-    // ─────────────────────────────── TODAY LINE ──────────────────────────────
+    // ────────────────────── MONTHS ──────────────────────
+    if (tracker.pixels_per_year > 250.0)
+    {
+        struct tm tm_start = *SafeLocalTime(&tracker.view_start);
+        struct tm tm = tm_start;
+        tm.tm_mday = 1;
+        tm.tm_hour = tm.tm_min = tm.tm_sec = 0;
+        tm.tm_isdst = -1;
+
+        time_t t = mktime(&tm);
+        if (t < tracker.view_start)
+        {
+            if (++tm.tm_mon >= 12) { tm.tm_mon = 0; tm.tm_year++; }
+            t = mktime(&tm);
+        }
+
+        while (t < view_end + 86400LL*60)
+        {
+            double secs = difftime(t, tracker.view_start);
+            float x = left + (float)(secs / secs_per_pixel);
+
+            if (x >= left - 200 && x <= right + 200)
+            {
+                struct tm *mtm = SafeLocalTime(&t);
+                bool is_january = (mtm->tm_mon == 0);
+
+                float thickness = is_january ? 2.8f : 1.9f;
+                float height_up = is_january ? 22 : 15;
+                Color col = is_january ? Fade(WHITE, 0.95f) : Fade(WHITE, 0.65f);
+
+                DrawLineEx((Vector2){x, baseline_y - height_up},
+                           (Vector2){x, baseline_y + 14}, thickness, col);
+
+                char label[16];
+                strftime(label, sizeof(label), "%b", mtm);   // "Jan", "Feb", etc. — no year ever
+
+                DrawTextPro(font, label,
+                            (Vector2){x + 10, baseline_y - 52},
+                            (Vector2){0,0}, 90.0f, 17, 1.2f, Fade(WHITE, 0.9f));
+            }
+
+            if (++tm.tm_mon >= 12) { tm.tm_mon = 0; tm.tm_year++; }
+            tm.tm_mday = 1;
+            t = mktime(&tm);
+        }
+    }
+
+    // ────────────────────── DAYS ──────────────────────
+    if (tracker.pixels_per_year > 3000.0)
+    {
+        struct tm tm_day = *SafeLocalTime(&tracker.view_start);
+        tm_day.tm_hour = tm_day.tm_min = tm_day.tm_sec = 0;
+        tm_day.tm_isdst = -1;
+        time_t t = mktime(&tm_day);
+
+        if (t < tracker.view_start) t += 86400;
+
+        while (t < view_end + 86400*10)
+        {
+            double secs = difftime(t, tracker.view_start);
+            float x = left + (float)(secs / secs_per_pixel);
+
+            if (x >= left - 100 && x <= right + 100)
+            {
+                struct tm *dtm = SafeLocalTime(&t);
+                bool is_first = (dtm->tm_mday == 1);
+                bool is_monday = (dtm->tm_wday == 1);
+
+                float thickness = is_first ? 2.4f : (is_monday ? 1.7f : 1.1f);
+                float height    = is_first ? 18 : (is_monday ? 13 : 10);
+                Color col       = Fade(WHITE, is_first ? 0.75f : (is_monday ? 0.55f : 0.38f));
+
+                DrawLineEx((Vector2){x, baseline_y - height},
+                           (Vector2){x, baseline_y + 10}, thickness, col);
+
+                bool show_number = is_first ||
+                                   (dtm->tm_mday % 7 == 1) ||
+                                   tracker.pixels_per_year > 20000.0;
+
+                if (show_number)
+                {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%d", dtm->tm_mday);
+                    DrawTextPro(font, buf,
+                                (Vector2){x + 8, baseline_y - 62},
+                                (Vector2){0,0}, 90.0f, 11, 1.0f, Fade(WHITE, 0.8f));
+                }
+            }
+            t += 86400;
+        }
+    }
+
+    // ────────────────────── TODAY LINE ──────────────────────
     time_t now = time(NULL);
-    float tx = left + (float)(difftime(now, tracker.view_start) / secs_per_pixel);
-    if (tx >= left - 100 && tx <= right + 100) {
-        DrawLineEx((Vector2){tx, y + 20}, (Vector2){tx, GetScreenHeight() - 50}, 3.0f, RED);
-        DrawTextEx(font, "TODAY", (Vector2){tx + 10, y + 26}, 22, 1, RED);
+    struct tm today_tm = *SafeLocalTime(&now);
+    today_tm.tm_hour = today_tm.tm_min = today_tm.tm_sec = 0;
+    today_tm.tm_isdst = -1;
+    time_t today_midnight = mktime(&today_tm);
+
+    double secs = difftime(today_midnight, tracker.view_start);
+    float tx = left + (float)(secs / secs_per_pixel);
+
+    if (tx >= left - 200 && tx <= right + 200)
+    {
+        DrawLineEx((Vector2){tx, baseline_y - 60}, (Vector2){tx, GetScreenHeight() - 50},
+                   4.5f, RED);
+        DrawCircle(tx, baseline_y, 10, RED);
+        DrawCircle(tx, baseline_y, 7, (Color){40,10,10,255});
+        DrawTextEx(font, "TODAY", (Vector2){tx + 14, baseline_y + 40}, 28, 1.3f, RED);
     }
 }
 
