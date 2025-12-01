@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <math.h>
+#include <math.h>          // ← THIS WAS MISSING
 
 #define MAX_ENTRIES 1000
 #define MAX_NAME    64
@@ -21,39 +21,391 @@ typedef struct {
     bool active;
 } TextInput;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Global state
+// ─────────────────────────────────────────────────────────────────────────────
+static Font font;
+static Tracker tracker = {0};
+static TextInput name_input, start_input, end_input;
+static int selected = -1;
+static int dragging = -1;
+static int drag_mode = 0;
+static time_t drag_offset = 0;
+static int last_selected = -1;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Forward declarations (so functions can be in any order)
+// ─────────────────────────────────────────────────────────────────────────────
+void DrawTextInput(TextInput *ti, Font font);
+void UpdateTextInput(TextInput *ti, Font font);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper Functions
+// ─────────────────────────────────────────────────────────────────────────────
 void InitTextInput(TextInput *ti, Rectangle r, const char *initial) {
     ti->rect = r; ti->active = false; ti->cursor_pos = 0;
-    strncpy(ti->text, initial ? initial : "", MAX_INPUT-1); ti->text[MAX_INPUT-1] = '\0';
+    strncpy(ti->text, initial ? initial : "", MAX_INPUT-1);
+    ti->text[MAX_INPUT-1] = '\0';
 }
 
-static float TextWidthUpTo(Font font, const char *text, int char_count, float fontSize, float spacing) {
-    if (char_count <= 0) return 0.0f;
-    char temp[MAX_INPUT]; int len = fmin(char_count, (int)strlen(text));
-    strncpy(temp, text, len); temp[len] = '\0';
-    return MeasureTextEx(font, temp, fontSize, spacing).x;
+time_t ParseDateTime(const char *s) {
+    struct tm tm = {0};
+    if (strptime(s, "%Y-%m-%d %H:%M", &tm) || strptime(s, "%Y-%m-%d", &tm))
+        return mktime(&tm);
+    return 0;
+}
+
+void SaveTracker(const char *file) {
+    FILE *f = fopen(file, "w"); if (!f) return;
+    fprintf(f, "[\n");
+    for (int i = 0; i < tracker.count; i++) {
+        char s1[64], s2[64];
+        strftime(s1, sizeof(s1), "%Y-%m-%d %H:%M", localtime(&tracker.entries[i].start));
+        strftime(s2, sizeof(s2), "%Y-%m-%d %H:%M", localtime(&tracker.entries[i].end));
+        fprintf(f, "  {\"name\":\"%s\",\"start\":\"%s\",\"end\":\"%s\"}%s\n",
+                tracker.entries[i].name, s1, s2, i < tracker.count-1 ? "," : "");
+    }
+    fprintf(f, "]\n"); fclose(f);
+}
+
+void LoadTracker(const char *file) {
+    FILE *f = fopen(file, "r"); if (!f) return;
+    char line[512]; tracker.count = 0;
+    while (fgets(line, sizeof(line), f) && tracker.count < MAX_ENTRIES) {
+        char name[MAX_NAME] = {0}, start[64] = {0}, end[64] = {0};
+        if (sscanf(line, "  {\"name\":\"%63[^\"]\",\"start\":\"%63[^\"]\",\"end\":\"%63[^\"]\"}", name, start, end) == 3) {
+            time_t s = ParseDateTime(start);
+            time_t e = ParseDateTime(end);
+            if (s && e > s) {
+                Entry *en = &tracker.entries[tracker.count++];
+                strncpy(en->name, name, MAX_NAME-1);
+                en->start = s; en->end = e;
+                en->duration_years = difftime(e, s) / (365.25*86400);
+                en->color = (Color){GetRandomValue(90,230), GetRandomValue(90,230), GetRandomValue(110,240), 255};
+            }
+        }
+    }
+    fclose(f);
+}
+
+void SyncInputsToSelected(void) {
+    if (selected < 0 || selected >= tracker.count) return;
+    Entry *e = &tracker.entries[selected];
+    strncpy(name_input.text, e->name, MAX_INPUT-1); name_input.text[MAX_INPUT-1] = '\0';
+    strftime(start_input.text, MAX_INPUT, "%Y-%m-%d", localtime(&e->start));
+    strftime(end_input.text,   MAX_INPUT, "%Y-%m-%d", localtime(&e->end));
+}
+
+void ApplyInputsToSelected(void) {
+    if (selected < 0 || selected >= tracker.count) return;
+    Entry *e = &tracker.entries[selected];
+    time_t s = ParseDateTime(start_input.text);
+    time_t e_time = ParseDateTime(end_input.text);  // ← Renamed to avoid conflict
+    if (s && e_time > s) {
+        strncpy(e->name, name_input.text[0] ? name_input.text : "Untitled", MAX_NAME-1);
+        e->start = s;
+        e->end = e_time;                            // ← Fixed: was "e = e"
+        e->duration_years = difftime(e->end, e->start) / (365.25*86400);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Input Handling
+// ─────────────────────────────────────────────────────────────────────────────
+void HandlePanningAndZooming(void) {
+    Vector2 mouse = GetMousePosition();
+    double secs_per_pixel = (365.25 * 86400) / tracker.pixels_per_year;
+
+    static Vector2 last_mouse = {0};
+    if (IsMouseButtonDown(MOUSE_RIGHT_BUTTON)) {
+        if (last_mouse.x || last_mouse.y) {
+            Vector2 delta = {mouse.x - last_mouse.x, mouse.y - last_mouse.y};
+            tracker.view_start -= (time_t)(delta.x * secs_per_pixel);
+        }
+        last_mouse = mouse; HideCursor();
+    } else { last_mouse = (Vector2){0}; ShowCursor(); }
+
+    float wheel = GetMouseWheelMove();
+    if (wheel != 0) {
+        tracker.pixels_per_year *= (wheel > 0 ? 1.6 : 0.625);
+        tracker.pixels_per_year = fmax(20.0, fmin(tracker.pixels_per_year, 500000.0));
+
+        double world_time_at_mouse = tracker.view_start + (mouse.x - 100) * secs_per_pixel;
+        double new_offset = (mouse.x - 100) / tracker.pixels_per_year * 365.25*86400;
+        tracker.view_start = (time_t)(world_time_at_mouse - new_offset);
+    }
+}
+
+void HandleSelectionAndDragging(void) {
+    Vector2 mouse = GetMousePosition();
+    double secs_per_pixel = (365.25 * 86400.0) / tracker.pixels_per_year;
+
+    if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON) && dragging == -1) {
+        for (int i = 0; i < tracker.count; i++) {
+            Entry *e = &tracker.entries[i];
+
+            double secs_from_view = difftime(e->start, tracker.view_start);
+            float x = 100.0f + (float)(secs_from_view / (365.25*86400.0) * tracker.pixels_per_year);
+            float w = (float)(e->duration_years * tracker.pixels_per_year);
+            if (w < 4.0f) w = 4.0f;
+
+            float y = 270.0f + i * 72.0f;                     // ← SAME AS DrawEvents() !!
+            Rectangle rec = { x, y, w, 50.0f };
+
+            if (CheckCollisionPointRec(mouse, rec)) {
+                selected = i;
+                dragging = i;
+
+                float rel = mouse.x - x;
+                drag_mode = (rel < EDGE_GRAB) ? 1 :            // left edge
+                            (rel > w - EDGE_GRAB) ? 2 : 0;   // right edge or middle
+
+                time_t cursor_time = tracker.view_start + (time_t)((mouse.x - 100.0f) * secs_per_pixel);
+                drag_offset = (drag_mode == 1) ? e->start - cursor_time :
+                              (drag_mode == 2) ? e->end   - cursor_time :
+                                                  e->start - cursor_time;
+                return;   // important — don’t check other events
+            }
+        }
+        // clicked empty space → deselect (unless on text inputs)
+        if (!CheckCollisionPointRec(mouse, name_input.rect) &&
+            !CheckCollisionPointRec(mouse, start_input.rect) &&
+            !CheckCollisionPointRec(mouse, end_input.rect)) {
+            selected = -1;
+        }
+    }
+
+    // ───── DRAGGING ─────
+    if (IsMouseButtonDown(MOUSE_LEFT_BUTTON) && dragging != -1) {
+        time_t cursor_time = tracker.view_start + (time_t)((mouse.x - 100.0f) * secs_per_pixel);
+        Entry *e = &tracker.entries[dragging];
+
+        if (drag_mode == 0) {                                   // move whole bar
+            time_t dur = e->end - e->start;
+            e->start = cursor_time + drag_offset;
+            e->end   = e->start + dur;
+        }
+        else if (drag_mode == 1) {                              // resize left
+            time_t ns = cursor_time + drag_offset;
+            if (ns < e->end - 86400) e->start = ns;
+        }
+        else if (drag_mode == 2) {                              // resize right
+            time_t ne = cursor_time + drag_offset;
+            if (ne > e->start +  + 86400) e->end = ne;
+        }
+        e->duration_years = difftime(e->end, e->start) / (365.25*86400.0);
+    }
+
+    if (IsMouseButtonReleased(MOUSE_LEFT_BUTTON)) {
+        dragging = -1;
+        drag_mode = 0;
+    }
+}
+
+void HandleKeyboardShortcuts(void) {
+    if (IsKeyPressed(KEY_ENTER) && selected == -1 && strlen(name_input.text) && strlen(start_input.text) && strlen(end_input.text)) {
+        time_t s = ParseDateTime(start_input.text);
+        time_t e = ParseDateTime(end_input.text);
+        if (s && e > s && tracker.count < MAX_ENTRIES) {
+            Entry *en = &tracker.entries[tracker.count++];
+            strncpy(en->name, name_input.text[0] ? name_input.text : "Untitled", MAX_NAME-1);
+            en->start = s; en->end = e;
+            en->duration_years = difftime(e, s) / (365.25*86400);
+            en->color = (Color){GetRandomValue(90,230), GetRandomValue(90,230), GetRandomValue(110,240), 255};
+            selected = tracker.count - 1;
+            last_selected = -2;
+        }
+    }
+
+    if (IsKeyPressed(KEY_DELETE) && selected >= 0) {
+        memmove(&tracker.entries[selected], &tracker.entries[selected+1],
+                sizeof(Entry) * (tracker.count - selected - 1));
+        tracker.count--; selected = -1; last_selected = -2;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rendering
+// ─────────────────────────────────────────────────────────────────────────────
+void DrawTimelineGrid(void) {
+    const float left  = 100.0f;
+    const float right = GetScreenWidth() - 50.0f;
+    const float y     = 180.0f;
+
+    double secs_per_pixel = (365.25 * 86400.0) / tracker.pixels_per_year;
+    double view_seconds   = (right - left) * secs_per_pixel;
+    time_t view_end       = tracker.view_start + (time_t)view_seconds;
+
+    DrawLineEx((Vector2){left, y}, (Vector2){right, y}, 2.0f, (Color){80, 80, 100, 255});
+
+    // ────────────────────────────── YEAR TICKS (fixed) ──────────────────────────────
+    const long long SECS_PER_YEAR = 31557600LL;
+
+    struct { int years; double min_px; float tick_h; float font; int dy; } levels[] = {
+        {1000, 1000, 28, 32, -40},
+        { 500,  700, 26, 30, -38},
+        { 100,  400, 22, 28, -36},
+        {  50,  200, 20, 24, -32},
+        {  10,  120, 16, 22, -28},
+        {   5,   70, 14, 20, -26},
+        {   1,   30, 12, 18, -24},
+    };
+
+    bool drew_year = false;
+    for (int i = 0; i < 7; i++) {
+        double spacing = levels[i].years * tracker.pixels_per_year;
+        if (spacing < levels[i].min_px) continue;
+
+        time_t interval = (time_t)levels[i].years * SECS_PER_YEAR;
+        time_t t = tracker.view_start - (tracker.view_start % interval);
+        if (t <= tracker.view_start) t += interval;
+
+        for (; t < view_end + interval; t += interval) {
+            float x = left + (float)(difftime(t, tracker.view_start) / secs_per_pixel);
+
+            if (x < left - 200 || x > right + 200) continue;
+
+            DrawLineEx((Vector2){x, y - levels[i].tick_h},
+                       (Vector2){x, y + 16}, 3.0f, WHITE);
+
+            struct tm *tm = localtime(&t);
+            if (tm) {
+                char buf[12];
+                snprintf(buf, sizeof(buf), "%d", tm->tm_year + 1900);
+                DrawTextPro(font, buf,
+                            (Vector2){x + 12, y + levels[i].dy},
+                            (Vector2){0,0}, 90.0f, levels[i].font, 1.5f, WHITE);
+            }
+        }
+        drew_year = true;
+        break;                                 // ← only one year level
+    }
+
+    // ─────────────────────────────── MONTHS ──────────────────────────────
+    if (tracker.pixels_per_year > 800.0) {
+        const time_t SECS_PER_MONTH = 2629746LL;
+        time_t t = tracker.view_start - (tracker.view_start % SECS_PER_MONTH);
+        if (t <= tracker.view_start) t += SECS_PER_MONTH;
+
+        for (; t < view_end + SECS_PER_MONTH; t += SECS_PER_MONTH) {
+            float x = left + (float)(difftime(t, tracker.view_start) / secs_per_pixel);
+            if (x < left - 100 || x > right + 100) continue;
+
+            DrawLineEx((Vector2){x, y - 8}, (Vector2){x, y + 10}, 1.8f, Fade(WHITE, 0.6f));
+
+            char buf[8];
+            if (strftime(buf, sizeof(buf), "%b", localtime(&t))) {
+                DrawTextPro(font, buf, (Vector2){x + 8, y - 48}, (Vector2){0,0},
+                            90.0f, 16, 1, Fade(WHITE, 0.9f));
+            }
+        }
+    }
+
+    // ─────────────────────────────── TODAY LINE ──────────────────────────────
+    time_t now = time(NULL);
+    float tx = left + (float)(difftime(now, tracker.view_start) / secs_per_pixel);
+    if (tx >= left - 100 && tx <= right + 100) {
+        DrawLineEx((Vector2){tx, y + 20}, (Vector2){tx, GetScreenHeight() - 50}, 3.0f, RED);
+        DrawTextEx(font, "TODAY", (Vector2){tx + 10, y + 26}, 22, 1, RED);
+    }
+}
+
+void DrawEvents(void) {
+    Vector2 mouse = GetMousePosition();
+
+    for (int i = 0; i < tracker.count; i++) {
+        Entry *e = &tracker.entries[i];
+
+        // X position and width
+        double secs_from_view = difftime(e->start, tracker.view_start);
+        float x = 100.0f + (float)(secs_from_view / (365.25*86400.0) * tracker.pixels_per_year);
+
+        float w = (float)(e->duration_years * tracker.pixels_per_year);
+        if (w < 4.0f) w = 4.0f;
+
+        // Y position — MUST be exactly 270
+        float y = 270.0f + i * 72.0f;
+
+        Rectangle rec = { x, y, w, 50.0f };
+
+        // Hover / selected / dragging colours
+        bool hover = CheckCollisionPointRec(mouse, rec);
+        Color col = e->color;
+        if (dragging == i)     col = Fade(col, 1.4f);
+        else if (hover)        col = Fade(col, 0.9f);
+
+        DrawRectangleRec(rec, col);
+        if (selected == i) DrawRectangleLinesEx(rec, 4.0f, YELLOW);
+
+        // Edge grab zones
+        if (hover || dragging == i) {
+            DrawRectangle(x, y, EDGE_GRAB, 50, Fade(WHITE, 0.3f));
+            DrawRectangle(x + w - EDGE_GRAB, y, EDGE_GRAB, 50, Fade(WHITE, 0.3f));
+        }
+
+        // Text
+        DrawTextEx(font, e->name, (Vector2){x + 14, y + 12}, 22, 1, WHITE);
+
+        char dur[32];
+        snprintf(dur, sizeof(dur), "%.2f y", e->duration_years);
+        float tw = MeasureTextEx(font, dur, 20,1).x;
+        DrawTextEx(font, dur, (Vector2){x + w - tw - 14, y + 14}, 20,1, WHITE);
+    }
+}
+
+void DrawUI(void) {
+    int W = GetScreenWidth(), H = GetScreenHeight();
+
+    DrawRectangle(0, 0, W, 90, (Color){20,20,35,255});
+    DrawLine(0, 90, W, 90, (Color){60,60,80,255});
+
+    DrawTextEx(font, "Name:",   (Vector2){100, 30}, 22, 1, (Color){200,200,220,255});
+    DrawTextEx(font, "Start:",  (Vector2){620, 30}, 22, 1, (Color){200,200,220,255});
+    DrawTextEx(font, "End:",    (Vector2){900, 30}, 22, 1, (Color){200,200,220,255});
+
+    DrawTextInput(&name_input,   font);
+    DrawTextInput(&start_input,  font);
+    DrawTextInput(&end_input,    font);
+
+    DrawTextEx(font,
+        "LClick=select • Drag edges=resize • RDrag=pan • Scroll=zoom • Enter=new • Del=remove",
+        (Vector2){15, H-32}, 18, 1, (Color){160,180,220,255});
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Text Input Implementation
+// ─────────────────────────────────────────────────────────────────────────────
+static float TextWidthUpTo(Font font, const char *text, int count, float size, float spacing) {
+    if (count <= 0) return 0;
+    char tmp[MAX_INPUT];
+    int len = (int)fmin(count, strlen(text));
+    strncpy(tmp, text, len); tmp[len] = '\0';
+    return MeasureTextEx(font, tmp, size, spacing).x;
 }
 
 void DrawTextInput(TextInput *ti, Font font) {
-    Color bg = ti->active ? (Color){50,80,140,255} : (Color){45,45,55,255};
+    Color bg = ti->active ? (Color){50,80,140,255} : (Color){40,40,50,255};
+    Color border = ti->active ? SKYBLUE : GRAY;
     DrawRectangleRec(ti->rect, bg);
-    DrawRectangleLinesEx(ti->rect, 2, ti->active ? SKYBLUE : GRAY);
+    DrawRectangleLinesEx(ti->rect, 2, border);
     const char *display = ti->text[0] ? ti->text : "(empty)";
-    DrawTextEx(font, display, (Vector2){ti->rect.x + 10, ti->rect.y + 10}, 20, 1, WHITE);
+    DrawTextEx(font, display, (Vector2){ti->rect.x + 12, ti->rect.y + 12}, 20, 1, WHITE);
     if (ti->active && ((int)(GetTime() * 2) % 2 == 0)) {
-        float x = ti->rect.x + 10 + TextWidthUpTo(font, ti->text, ti->cursor_pos, 20, 1);
-        DrawRectangle((int)x, (int)ti->rect.y + 10, 2, 20, WHITE);
+        float x = ti->rect.x + 12 + TextWidthUpTo(font, ti->text, ti->cursor_pos, 20, 1);
+        DrawRectangle((int)x, (int)ti->rect.y + 12, 2, 20, WHITE);
     }
 }
 
 void UpdateTextInput(TextInput *ti, Font font) {
     Vector2 mouse = GetMousePosition();
     if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
+        bool was_active = ti->active;
         ti->active = CheckCollisionPointRec(mouse, ti->rect);
-        if (ti->active) {
-            float rel_x = mouse.x - (ti->rect.x + 10);
+        if (ti->active && !was_active) {
+            float rel_x = mouse.x - (ti->rect.x + 12);
             if (rel_x < 0) ti->cursor_pos = 0;
             else {
-                int low = 0, high = strlen(ti->text);
+                int low = 0, high = (int)strlen(ti->text);
                 while (low < high) {
                     int mid = (low + high + 1) / 2;
                     if (TextWidthUpTo(font, ti->text, mid, 20, 1) <= rel_x) low = mid;
@@ -68,8 +420,7 @@ void UpdateTextInput(TextInput *ti, Font font) {
     int key = GetCharPressed();
     while (key > 0) {
         if (key >= 32 && key <= 125 && strlen(ti->text) < MAX_INPUT-2) {
-            memmove(ti->text + ti->cursor_pos + 1, ti->text + ti->cursor_pos,
-                    strlen(ti->text + ti->cursor_pos) + 1);
+            memmove(ti->text + ti->cursor_pos + 1, ti->text + ti->cursor_pos, strlen(ti->text + ti->cursor_pos) + 1);
             ti->text[ti->cursor_pos++] = (char)key;
         }
         key = GetCharPressed();
@@ -82,223 +433,56 @@ void UpdateTextInput(TextInput *ti, Font font) {
     if (IsKeyPressed(KEY_END)) ti->cursor_pos = strlen(ti->text);
 }
 
-time_t ParseDateTime(const char *s) {
-    struct tm tm = {0};
-    strptime(s, "%Y-%m-%d %H:%M", &tm) || strptime(s, "%Y-%m-%d", &tm);
-    return mktime(&tm);
-}
-
-void Save(Tracker *t, const char *file) {
-    FILE *f = fopen(file, "w"); if (!f) return;
-    fprintf(f, "[\n");
-    for (int i = 0; i < t->count; i++) {
-        char s1[64], s2[64];
-        strftime(s1, sizeof(s1), "%Y-%m-%d %H:%M", localtime(&t->entries[i].start));
-        strftime(s2, sizeof(s2), "%Y-%m-%d %H:%M", localtime(&t->entries[i].end));
-        fprintf(f, "  {\"name\":\"%s\",\"start\":\"%s\",\"end\":\"%s\"}%s\n",
-                t->entries[i].name, s1, s2, i < t->count-1 ? "," : "");
-    }
-    fprintf(f, "]\n"); fclose(f);
-}
-
-void Load(Tracker *t, const char *file) {
-    FILE *f = fopen(file, "r"); if (!f) return;
-    char line[512]; t->count = 0;
-    while (fgets(line, sizeof(line), f) && t->count < MAX_ENTRIES) {
-        char name[MAX_NAME] = {0}, start[64] = {0}, end[64] = {0};
-        if (sscanf(line, "  {\"name\":\"%63[^\"]\",\"start\":\"%63[^\"]\",\"end\":\"%63[^\"]\"}", name, start, end) == 3) {
-            strncpy(t->entries[t->count].name, name, MAX_NAME-1);
-            t->entries[t->count].start = ParseDateTime(start);
-            t->entries[t->count].end   = ParseDateTime(end);
-            t->entries[t->count].duration_years = difftime(t->entries[t->count].end, t->entries[t->count].start) / (365.25*86400);
-            t->entries[t->count].color = (Color){GetRandomValue(90,230), GetRandomValue(90,230), GetRandomValue(110,240), 255};
-            t->count++;
-        }
-    }
-    fclose(f);
-}
-
+// ─────────────────────────────────────────────────────────────────────────────
+// Main
+// ─────────────────────────────────────────────────────────────────────────────
 int main(void) {
     const int W = 1500, H = 900;
     InitWindow(W, H, "Lifetime Visual Time Tracker");
     SetTargetFPS(60);
 
-    Font font = LoadFontEx("/usr/share/fonts/TTF/DejaVuSans.ttf", 22, NULL, 0);
+    font = LoadFontEx("/usr/share/fonts/TTF/DejaVuSans.ttf", 22, NULL, 0);
     if (font.texture.id == 0) font = GetFontDefault();
 
-    Tracker tracker = {0};
     tracker.pixels_per_year = 700.0;
     tracker.view_start = time(NULL) - 20LL * 365 * 86400;
-    Load(&tracker, "timetracker.json");
+    LoadTracker("timetracker.json");
 
-    TextInput name   = {0}; InitTextInput(&name,   (Rectangle){180, 30, 420, 44}, "My Life");
-    TextInput startf = {0}; InitTextInput(&startf, (Rectangle){680, 30, 200, 44}, "1990-01-01");
-    TextInput endf   = {0}; InitTextInput(&endf,   (Rectangle){960, 30, 200, 44}, "2030-12-31");
-
-    int selected = -1;
-    int dragging = -1;        // event being dragged
-    int drag_mode = 0;        // 0=move, 1=left edge, 2=right edge
-    time_t drag_offset = 0;
+    InitTextInput(&name_input,   (Rectangle){180, 20, 420, 48}, "");
+    InitTextInput(&start_input,  (Rectangle){680, 20, 200, 48}, "");
+    InitTextInput(&end_input,    (Rectangle){960, 20, 200, 48}, "");
 
     while (!WindowShouldClose()) {
-        Vector2 mouse = GetMousePosition();
-        double secs_per_pixel = (365.25 * 86400) / tracker.pixels_per_year;
+        HandlePanningAndZooming();
+        HandleSelectionAndDragging();
+        UpdateTextInput(&name_input, font);
+        UpdateTextInput(&start_input, font);
+        UpdateTextInput(&end_input, font);
+        HandleKeyboardShortcuts();
 
-        // RIGHT-CLICK PANNING — restored and rock-solid
-static Vector2 last_mouse = {0};
-if (IsMouseButtonDown(MOUSE_RIGHT_BUTTON)) {
-    Vector2 mouse = GetMousePosition();
-    if (last_mouse.x != 0 || last_mouse.y != 0) {
-        Vector2 delta = (Vector2){mouse.x - last_mouse.x, mouse.y - last_mouse.y};
-        tracker.view_start -= (time_t)(delta.x * secs_per_pixel);
-    }
-    last_mouse = mouse;
-    HideCursor();
-} else {
-    last_mouse = (Vector2){0};
-    ShowCursor();
-}
-
-        // Zoom
-        float wheel = GetMouseWheelMove();
-        if (wheel != 0) {
-            double old = tracker.pixels_per_year;
-            tracker.pixels_per_year *= (wheel > 0 ? 1.6 : 0.625);
-            tracker.pixels_per_year = fmax(20.0, fmin(tracker.pixels_per_year, 500000.0));
-            double world_x = tracker.view_start + (mouse.x - 100) / old * 365.25*86400;
-            tracker.view_start = (time_t)(world_x - (mouse.x - 100) / tracker.pixels_per_year * 365.25*86400);
+        if (selected != last_selected) {
+            SyncInputsToSelected();
+            last_selected = selected;
         }
-
-        // Start dragging event
-        if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON) && dragging == -1) {
-            for (int i = 0; i < tracker.count; i++) {
-                Entry *e = &tracker.entries[i];
-                double x = 100 + difftime(e->start, tracker.view_start) / (365.25*86400) * tracker.pixels_per_year;
-                double w = e->duration_years * tracker.pixels_per_year;
-                if (w < 4) w = 4;
-                Rectangle r = {x, 120 + i*72, w, 50};
-
-                if (CheckCollisionPointRec(mouse, r)) {
-                    selected = dragging = i;
-                    double rel_x = mouse.x - x;
-                    if (rel_x < EDGE_GRAB) drag_mode = 1;
-                    else if (rel_x > w - EDGE_GRAB) drag_mode = 2;
-                    else drag_mode = 0;
-
-                    time_t cursor_time = tracker.view_start + (time_t)((mouse.x - 100) / tracker.pixels_per_year * 365.25*86400);
-                    if (drag_mode == 1) drag_offset = e->start - cursor_time;
-                    else if (drag_mode == 2) drag_offset = e->end - cursor_time;
-                    else drag_offset = e->start - cursor_time;
-                    break;
-                }
+        if (selected >= 0) {
+            static char last_name[128] = "", last_start[128] = "", last_end[128] = "";
+            if (strcmp(name_input.text, last_name) || strcmp(start_input.text, last_start) || strcmp(end_input.text, last_end)) {
+                ApplyInputsToSelected();
+                strcpy(last_name, name_input.text);
+                strcpy(last_start, start_input.text);
+                strcpy(last_end, end_input.text);
             }
-        }
-
-        // Update dragging
-        if (IsMouseButtonDown(MOUSE_LEFT_BUTTON) && dragging != -1) {
-            time_t cursor_time = tracker.view_start + (time_t)((mouse.x - 100) / tracker.pixels_per_year * 365.25*86400);
-            Entry *e = &tracker.entries[dragging];
-
-            if (drag_mode == 0) {
-                time_t duration = e->end - e->start;
-                e->start = cursor_time + drag_offset;
-                e->end = e->start + duration;
-            } else if (drag_mode == 1) {
-                time_t new_start = cursor_time + drag_offset;
-                if (new_start < e->end - 86400) e->start = new_start;
-            } else if (drag_mode == 2) {
-                time_t new_end = cursor_time + drag_offset;
-                if (new_end > e->start + 86400) e->end = new_end;
-            }
-            e->duration_years = difftime(e->end, e->start) / (365.25*86400);
-        }
-
-        if (IsMouseButtonReleased(MOUSE_LEFT_BUTTON)) dragging = -1;
-
-        UpdateTextInput(&name, font);
-        UpdateTextInput(&startf, font);
-        UpdateTextInput(&endf, font);
-
-        if (IsKeyPressed(KEY_ENTER) && strlen(name.text) && strlen(startf.text) && strlen(endf.text)) {
-            time_t s = ParseDateTime(startf.text);
-            time_t e = ParseDateTime(endf.text);
-            if (s && e > s && tracker.count < MAX_ENTRIES) {
-                Entry *en = &tracker.entries[tracker.count++];
-                strncpy(en->name, name.text, MAX_NAME-1);
-                en->start = s; en->end = e;
-                en->duration_years = difftime(e, s) / (365.25*86400);
-                en->color = (Color){GetRandomValue(90,230), GetRandomValue(90,230), GetRandomValue(110,240), 255};
-            }
-        }
-
-        if (IsKeyPressed(KEY_DELETE) && selected >= 0) {
-            memmove(&tracker.entries[selected], &tracker.entries[selected+1], sizeof(Entry)*(tracker.count - selected - 1));
-            tracker.count--; selected = -1;
         }
 
         BeginDrawing();
-        ClearBackground((Color){15,15,30,255});
-
-        // Draw events
-        for (int i = 0; i < tracker.count; i++) {
-            Entry *e = &tracker.entries[i];
-            double x = 100 + difftime(e->start, tracker.view_start) / (365.25*86400) * tracker.pixels_per_year;
-            double w = e->duration_years * tracker.pixels_per_year;
-            if (w < 4) w = 4;
-            float y = 120 + i*72;
-            Rectangle r = {x, y, w, 50};
-
-            bool hover = CheckCollisionPointRec(mouse, r);
-            Color col = (dragging == i) ? Fade(e->color, 1.3f) : (hover ? Fade(e->color, 0.9f) : e->color);
-            DrawRectangleRec(r, col);
-            if (selected == i) DrawRectangleLinesEx(r, 4, YELLOW);
-
-            if (hover || dragging == i) {
-                DrawRectangle(x, y, EDGE_GRAB, 50, Fade(WHITE, 0.2f));
-                DrawRectangle(x + w - EDGE_GRAB, y, EDGE_GRAB, 50, Fade(WHITE, 0.2f));
-            }
-
-            DrawTextEx(font, e->name, (Vector2){x + 14, y + 12}, 22, 1, WHITE);
-            char buf[64]; snprintf(buf, 64, "%.2f years", e->duration_years);
-            DrawTextEx(font, buf, (Vector2){x + w - MeasureTextEx(font, buf, 20, 1).x - 14, y + 14}, 20, 1, WHITE);
-        }
-
-        // Smart minimal ticks
-        DrawLine(100, 94, W-50, 94, (Color){70,70,90,255});
-        double pixels_per_day = 86400.0 / secs_per_pixel;
-        time_t interval; const char* fmt; int tick_len = 3;
-
-        if (pixels_per_day > 80) { interval = 86400; fmt = "%d"; tick_len = 5; }
-        else if (pixels_per_day > 20) { interval = 7*86400; fmt = "%d"; tick_len = 4; }
-        else if (pixels_per_day * 30.4 > 60) { interval = 30.4*86400; fmt = "%b"; tick_len = 4; }
-        else { interval = 365.25*86400; fmt = "%Y"; tick_len = 3; }
-
-        time_t t0 = tracker.view_start - (tracker.view_start % interval);
-        if (t0 < tracker.view_start) t0 += interval;
-
-        for (time_t t = t0; t < tracker.view_start + (W/tracker.pixels_per_year)*365.25*86400 + interval; t += interval) {
-            float x = 100 + difftime(t, tracker.view_start) / secs_per_pixel;
-            if (x < 80 || x > W-30) continue;
-            DrawLineEx((Vector2){x, 94 - tick_len}, (Vector2){x, 100}, tick_len == 5 ? 5 : 3, WHITE);
-            char label[16]; struct tm *tm = localtime(&t);
-            strftime(label, sizeof(label), fmt, tm);
-            DrawTextPro(font, label, (Vector2){x + 6, 85}, (Vector2){0,0}, 90.0f, 18, 1, LIGHTGRAY);
-        }
-
-        DrawTextEx(font, "Name:", (Vector2){100, 38}, 22, 1, WHITE);
-        DrawTextEx(font, "Start:", (Vector2){600, 38}, 22, 1, WHITE);
-        DrawTextEx(font, "End:", (Vector2){890, 38}, 22, 1, WHITE);
-        DrawTextInput(&name, font);
-        DrawTextInput(&startf, font);
-        DrawTextInput(&endf, font);
-
-        DrawTextEx(font, "Left-drag: move/resize • Right-drag: pan • Scroll: zoom • ENTER add • DEL remove",
-                   (Vector2){10, H-38}, 19, 1, (Color){190,210,230,255});
-
+        ClearBackground((Color){12,12,28,255});
+        DrawTimelineGrid();
+        DrawEvents();
+        DrawUI();
         EndDrawing();
     }
 
-    Save(&tracker, "timetracker.json");
+    SaveTracker("timetracker.json");
     UnloadFont(font);
     CloseWindow();
     return 0;
