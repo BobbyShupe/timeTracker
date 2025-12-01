@@ -338,14 +338,20 @@ void DrawTimelineGrid(void)
     // ────────────────────── DAYS ──────────────────────
     if (tracker.pixels_per_year > 3000.0)
     {
-        struct tm tm_day = *SafeLocalTime(&tracker.view_start);
-        tm_day.tm_hour = tm_day.tm_min = tm_day.tm_sec = 0;
-        tm_day.tm_isdst = -1;
-        time_t t = mktime(&tm_day);
+        // Start from first full day in view
+        struct tm day_tm = *SafeLocalTime(&tracker.view_start);
+        day_tm.tm_hour = day_tm.tm_min = day_tm.tm_sec = 0;
+        day_tm.tm_isdst = -1;
+        time_t t = mktime(&day_tm);
 
-        if (t < tracker.view_start) t += 86400;
+        if (t < tracker.view_start) {
+            day_tm.tm_mday++;
+            t = mktime(&day_tm);
+        }
 
-        while (t < view_end + 86400*10)
+        time_t stop = view_end + 86400 * 10;
+
+        while (t < stop)
         {
             double secs = difftime(t, tracker.view_start);
             float x = left + (float)(secs / secs_per_pixel);
@@ -353,33 +359,52 @@ void DrawTimelineGrid(void)
             if (x >= left - 100 && x <= right + 100)
             {
                 struct tm *dtm = SafeLocalTime(&t);
-                bool is_first = (dtm->tm_mday == 1);
-                bool is_monday = (dtm->tm_wday == 1);
+                int day = dtm->tm_mday;
 
-                float thickness = is_first ? 2.4f : (is_monday ? 1.7f : 1.1f);
-                float height    = is_first ? 18 : (is_monday ? 13 : 10);
-                Color col       = Fade(WHITE, is_first ? 0.75f : (is_monday ? 0.55f : 0.38f));
+                // Determine tick style based on day number only
+                bool is_month_start   = (day == 1);
+                bool is_week_divider  = (day == 8 || day == 15 || day == 22 || day == 29);
+
+                float thickness, height;
+                Color col;
+
+                if (is_month_start) {
+                    thickness = 2.8f;
+                    height    = 22.0f;
+                    col       = Fade(WHITE, 0.90f);
+                }
+                else if (is_week_divider) {
+                    thickness = 2.1f;
+                    height    = 16.0f;
+                    col       = Fade(WHITE, 0.75f);
+                }
+                else {
+                    thickness = 1.0f;
+                    height    = 9.0f;
+                    col       = Fade(WHITE, 0.38f);
+                }
 
                 DrawLineEx((Vector2){x, baseline_y - height},
                            (Vector2){x, baseline_y + 10}, thickness, col);
 
-                bool show_number = is_first ||
-                                   (dtm->tm_mday % 7 == 1) ||
-                                   tracker.pixels_per_year > 20000.0;
-
-                if (show_number)
+                // Show day numbers on month start + weekly dividers + when super zoomed
+                if (is_month_start || is_week_divider || tracker.pixels_per_year > 20000.0)
                 {
                     char buf[16];
-                    snprintf(buf, sizeof(buf), "%d", dtm->tm_mday);
+                    snprintf(buf, sizeof(buf), "%d", day);
                     DrawTextPro(font, buf,
                                 (Vector2){x + 8, baseline_y - 62},
-                                (Vector2){0,0}, 90.0f, 11, 1.0f, Fade(WHITE, 0.8f));
+                                (Vector2){0,0}, 90.0f, 11, 1.0f, Fade(WHITE, 0.85f));
                 }
             }
-            t += 86400;
+
+            // Always advance one calendar day (handles 28/29/30/31 perfectly)
+            day_tm.tm_mday++;
+            day_tm.tm_isdst = -1;
+            t = mktime(&day_tm);
         }
     }
-
+        
     // ────────────────────── TODAY LINE ──────────────────────
     time_t now = time(NULL);
     struct tm today_tm = *SafeLocalTime(&now);
