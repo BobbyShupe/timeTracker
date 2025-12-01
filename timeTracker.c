@@ -114,48 +114,63 @@ void ApplyInputsToSelected(void) {
 // ─────────────────────────────────────────────────────────────────────────────
 void HandlePanningAndZooming(void)
 {
-    Vector2 mouse = GetMousePosition();
     const float left = 100.0f;
-
     double secs_per_pixel = (365.25 * 86400.0) / tracker.pixels_per_year;
 
-    // ───── SMOOTH PANNING (Right drag) ─────
-    static Vector2 last_mouse = {0};
+    // ───── INFINITE CENTER-LOCKED PANNING (cursor stays in middle) ─────
+    static bool panning = false;
+    Vector2 screen_center = { GetScreenWidth() / 2.0f, GetScreenHeight() / 2.0f };
+
     if (IsMouseButtonDown(MOUSE_RIGHT_BUTTON))
     {
-        if (last_mouse.x != 0.0f)
+        if (!panning)
         {
-            float delta_x = mouse.x - last_mouse.x;
-            tracker.view_start -= (time_t)(delta_x * secs_per_pixel);
+            // First frame: lock cursor to center
+            panning = true;
+            HideCursor();
+            SetMousePosition((int)screen_center.x, (int)screen_center.y);
+
         }
-        last_mouse = mouse;
-        HideCursor();
+        else
+        {
+            // Read current (centered) mouse position
+            Vector2 mouse = GetMousePosition();
+            Vector2 delta = { mouse.x - screen_center.x, mouse.y - screen_center.y };
+
+            // Apply movement (only horizontal matters for timeline)
+            if (fabsf(delta.x) > 0.1f)
+            {
+                tracker.view_start -= (time_t)(delta.x * secs_per_pixel);
+            }
+
+            // Immediately snap cursor back to center
+            SetMousePosition((int)screen_center.x, (int)screen_center.y);
+        }
     }
     else
     {
-        last_mouse = (Vector2){0};
-        ShowCursor();
+        if (panning)
+        {
+            panning = false;
+            ShowCursor();
+        }
     }
 
-    // ───── PRECISE, DIRECT, NO-GLIDE ZOOM (exactly what you asked for) ─────
+    // ───── ZOOM (unchanged — still perfect) ─────
     float wheel = GetMouseWheelMoveV().y;
-    if (wheel == 0.0f) wheel = GetMouseWheelMove();  // fallback
+    if (wheel == 0.0f) wheel = GetMouseWheelMove();
 
     if (wheel != 0.0f)
     {
-        // Time under mouse cursor — stays perfectly fixed
+        Vector2 mouse = GetMousePosition();
         time_t time_under_mouse = tracker.view_start + (time_t)((mouse.x - left) * secs_per_pixel);
 
-        // Precise, predictable zoom steps
-        double zoom_factor = (wheel > 0) ? 1.25 : 0.80;   // 25% in / 20% out → feels perfect
-
+        double zoom_factor = (wheel > 0) ? 1.25 : 0.80;
         tracker.pixels_per_year *= zoom_factor;
 
-        // Hard, safe limits
         if (tracker.pixels_per_year < 20.0)     tracker.pixels_per_year = 20.0;
         if (tracker.pixels_per_year > 2000000.0) tracker.pixels_per_year = 2000000.0;
 
-        // Re-center exactly under mouse
         secs_per_pixel = (365.25 * 86400.0) / tracker.pixels_per_year;
         tracker.view_start = time_under_mouse - (time_t)((mouse.x - left) * secs_per_pixel);
     }
