@@ -33,8 +33,16 @@ static int drag_mode = 0;
 static time_t drag_offset = 0;
 static int last_selected = -1;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Forward declarations (so functions can be in any order)
+static const float timeline_y = 140.0f;
+static const float events_start_y = timeline_y + 160.0f;   // ← YOUR desired offset
+static const float row_height     = 18.0f;
+static const float bar_height     = 14.0f;
+
+static time_t original_duration = 0;
+static int    g_track_of_event[1024] = {0};
+static double secs_per_pixel = 0.0;
+
+#define EDGE_GRAB_PIXELS 16.0f   // use this instead of EDGE_GRAB to avoid conflict
 // ─────────────────────────────────────────────────────────────────────────────
 void DrawTextInput(TextInput *ti, Font font);
 void UpdateTextInput(TextInput *ti, Font font);
@@ -177,73 +185,34 @@ void HandlePanningAndZooming(void)
 }
 
 void HandleSelectionAndDragging(void) {
+    if (dragging == -1) return;
+
     Vector2 mouse = GetMousePosition();
-    double secs_per_pixel = (365.25 * 86400.0) / tracker.pixels_per_year;
+    time_t cursor_time = tracker.view_start + (time_t)((mouse.x - 100.0f) * secs_per_pixel);
+    Entry *e = &tracker.entries[dragging];
 
-    if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON) && dragging == -1) {
-        for (int i = 0; i < tracker.count; i++) {
-            Entry *e = &tracker.entries[i];
-
-            double secs_from_view = difftime(e->start, tracker.view_start);
-            float x = 100.0f + (float)(secs_from_view / (365.25*86400.0) * tracker.pixels_per_year);
-            float w = (float)(e->duration_years * tracker.pixels_per_year);
-            if (w < 4.0f) w = 4.0f;
-
-			const float start_y = 300.0f;
-			const float row_height = 36.0f;
-			float y = start_y + i * row_height;                     // ← SAME AS DrawEvents() !!
-            Rectangle rec = { x, y, w, 28.0f };
-
-            if (CheckCollisionPointRec(mouse, rec)) {
-                selected = i;
-                dragging = i;
-
-                float rel = mouse.x - x;
-                drag_mode = (rel < EDGE_GRAB) ? 1 :            // left edge
-                            (rel > w - EDGE_GRAB) ? 2 : 0;   // right edge or middle
-
-                time_t cursor_time = tracker.view_start + (time_t)((mouse.x - 100.0f) * secs_per_pixel);
-                drag_offset = (drag_mode == 1) ? e->start - cursor_time :
-                              (drag_mode == 2) ? e->end   - cursor_time :
-                                                  e->start - cursor_time;
-                return;   // important — don’t check other events
-            }
-        }
-        // clicked empty space → deselect (unless on text inputs)
-        if (!CheckCollisionPointRec(mouse, name_input.rect) &&
-            !CheckCollisionPointRec(mouse, start_input.rect) &&
-            !CheckCollisionPointRec(mouse, end_input.rect)) {
-            selected = -1;
-        }
-    }
-
-    // ───── DRAGGING ─────
-    if (IsMouseButtonDown(MOUSE_LEFT_BUTTON) && dragging != -1) {
-        time_t cursor_time = tracker.view_start + (time_t)((mouse.x - 100.0f) * secs_per_pixel);
-        Entry *e = &tracker.entries[dragging];
-
-        if (drag_mode == 0) {                                   // move whole bar
-            time_t dur = e->end - e->start;
+    if (IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
+        if (drag_mode == 0) {
             e->start = cursor_time + drag_offset;
-            e->end   = e->start + dur;
+            e->end   = e->start + original_duration;
         }
-        else if (drag_mode == 1) {                              // resize left
+        else if (drag_mode == 1) {
             time_t ns = cursor_time + drag_offset;
             if (ns < e->end - 86400) e->start = ns;
         }
-        else if (drag_mode == 2) {                              // resize right
+        else if (drag_mode == 2) {
             time_t ne = cursor_time + drag_offset;
-            if (ne > e->start +  + 86400) e->end = ne;
+            if (ne > e->start + 86400) e->end = ne;
         }
-        e->duration_years = difftime(e->end, e->start) / (365.25*86400.0);
-        if (selected == dragging) {
-            SyncInputsToSelected();   // live update while dragging!
-        }
+
+        e->duration_years = difftime(e->end, e->start) / (365.25 * 86400.0);
+        if (selected == dragging) SyncInputsToSelected();
     }
 
     if (IsMouseButtonReleased(MOUSE_LEFT_BUTTON)) {
         dragging = -1;
         drag_mode = 0;
+        original_duration = 0;
         if (selected >= 0) SyncInputsToSelected();
     }
 }
@@ -481,61 +450,127 @@ void DrawTimelineGrid(void)
 
 void DrawEvents(void) {
     Vector2 mouse = GetMousePosition();
+    const float row_spacing    = 10.0f;
+    const float line_thickness = 2.0f;
+    const int   max_tracks     = 50;
 
-    // NEW: compact vertical spacing — was 72, now 36 → twice as many events!
-    const float row_height = 36.0f;
-    const float start_y    = 300.0f;   // start lower to make room above
+    // Update global conversion factor
+    secs_per_pixel = (365.25 * 86400.0) / tracker.pixels_per_year;
 
+    // --- Sort events by start time ---
+    int order[tracker.count];
+    for (int i = 0; i < tracker.count; i++) order[i] = i;
+
+    for (int i = 0; i < tracker.count - 1; i++) {
+        for (int j = i + 1; j < tracker.count; j++) {
+            if (tracker.entries[order[i]].start > tracker.entries[order[j]].start) {
+                int tmp = order[i];
+                order[i] = order[j];
+                order[j] = tmp;
+            }
+        }
+    }
+
+    // --- Assign lowest possible track (greedy) ---
+    time_t track_free_until[max_tracks];
+    for (int t = 0; t < max_tracks; t++) track_free_until[t] = 0;
+
+    for (int k = 0; k < tracker.count; k++) {
+        int i = order[k];
+        Entry *e = &tracker.entries[i];
+
+        int track = 0;
+        while (track < max_tracks && e->start < track_free_until[track])
+            track++;
+
+        if (track >= max_tracks) track = max_tracks - 1;
+        track_free_until[track] = e->end;
+        g_track_of_event[i] = track;
+    }
+
+    // --- Draw + handle clicks ---
     for (int i = 0; i < tracker.count; i++) {
         Entry *e = &tracker.entries[i];
 
         double secs_from_view = difftime(e->start, tracker.view_start);
-        float x = 100.0f + (float)(secs_from_view / (365.25*86400.0) * tracker.pixels_per_year);
+        float x_start = 100.0f + (float)(secs_from_view * tracker.pixels_per_year / (365.25 * 86400.0));
+        float duration_px = e->duration_years * tracker.pixels_per_year;
+        if (duration_px < 2.0f) duration_px = 2.0f;
 
-        float w = (float)(e->duration_years * tracker.pixels_per_year);
-        if (w < 5.0f) w = 5.0f;        // minimum visible width
+        if (x_start > GetScreenWidth() + 200) continue;
 
-        float y = start_y + i * row_height;
+        float draw_x1 = fmaxf(x_start, 100.0f);
+        float draw_x2 = x_start + duration_px;
+        float draw_len = draw_x2 - draw_x1;
+        if (draw_len <= 0.0f) continue;
 
-        Rectangle rec = { x, y, w, 28.0f };   // height 28 instead of 50
+        float y = events_start_y + g_track_of_event[i] * row_spacing;
 
-        // Hover / selected colors
-        bool hover = CheckCollisionPointRec(mouse, rec);
-        Color col = e->color;
-        if (dragging == i)     col = Fade(col, 1.4f);
-        else if (hover)        col = Fade(col, 0.9f);
-        else if (selected == i) col = Fade(col, 1.1f);
+        Rectangle hit = { draw_x1, y - 7, draw_len, 16 };
+        bool hovered = CheckCollisionPointRec(mouse, hit);
 
-        DrawRectangleRec(rec, col);
-        if (selected == i) DrawRectangleLinesEx(rec, 3.0f, YELLOW);
+        // Click → start drag
+        if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON) && hovered && dragging == -1) {
+            selected = i;
+            dragging = i;
 
-        // Edge grab handles (only when hovered or dragging)
-        if (hover || dragging == i) {
-            DrawRectangle(x, y, 16, 28, Fade(WHITE, 0.3f));
-            DrawRectangle(x + w - 16, y, 16, 28, Fade(WHITE, 0.3f));
+            float rel_x = mouse.x - draw_x1;
+            drag_mode = (rel_x < EDGE_GRAB_PIXELS) ? 1 :
+                        (rel_x > draw_len - EDGE_GRAB_PIXELS) ? 2 : 0;
+
+            time_t cursor_time = tracker.view_start + (time_t)((mouse.x - 100.0f) * secs_per_pixel);
+
+            if (drag_mode == 1)      drag_offset = e->start - cursor_time;
+            else if (drag_mode == 2) drag_offset = e->end   - cursor_time;
+            else {
+                drag_offset = e->start - cursor_time;
+                original_duration = e->end - e->start;
+            }
         }
 
-        // Name — smaller font, clipped smartly
-        const char* name = e->name;
-        if (TextLength(name) * 10 > (unsigned int)w - 40) {
-            // Auto-truncate long names with "..."
-            static char short_name[64];
-            strncpy(short_name, name, 20);
-            short_name[20] = '\0';
-            strcat(short_name, "...");
-            name = short_name;
+        bool is_selected = (selected == i);
+        bool is_dragging = (dragging == i);
+
+        Color col = (Color){240, 40, 40, 255};
+        if (is_dragging)      col = (Color){255,100,100,255};
+        else if (is_selected) col = (Color){255,70,70,255};
+        else if (hovered)     col = (Color){255,130,130,255};
+
+        DrawLineEx((Vector2){draw_x1, y}, (Vector2){draw_x1 + draw_len, y}, line_thickness, col);
+
+        // Text
+        if (draw_len >= 40.0f) {
+            const char* name = e->name[0] ? e->name : "Untitled";
+            float fs = 12.0f;
+            Vector2 ts = MeasureTextEx(font, name, fs, 1.0f);
+
+            static char buf[64];
+            if (ts.x > draw_len - 16.0f) {
+                strncpy(buf, name, 20);
+                strcpy(buf + 20, "...");
+                buf[23] = '\0';
+                name = buf;
+                ts = MeasureTextEx(font, name, fs, 1.0f);
+            }
+
+            float tx = draw_x1 + (draw_len - ts.x) * 0.5f;
+            float ty = y - ts.y * 0.5f - 1.0f;
+
+            DrawTextEx(font, name, (Vector2){tx+1, ty+1}, fs, 1, Fade(BLACK,0.6f));
+            DrawTextEx(font, name, (Vector2){tx,   ty},   fs, 1, WHITE);
         }
-        DrawTextEx(font, name, (Vector2){x + 10, y + 6}, 18, 1, WHITE);
 
-        // Duration in corner
-        char dur[32];
-        if (e->duration_years < 1.0)
-            snprintf(dur, sizeof(dur), "%.1f mo", e->duration_years * 12.0);
-        else
-            snprintf(dur, sizeof(dur), "%.1f y", e->duration_years);
-
-        float tw = MeasureTextEx(font, dur, 16, 1).x;
-        DrawTextEx(font, dur, (Vector2){x + w - tw - 8, y + 8}, 16, 1, Fade(WHITE, 0.9f));
+        // Resize handles
+        if ((hovered || is_selected || is_dragging) && duration_px >= 20.0f) {
+            if (x_start <= 120.0f) {
+                DrawRing((Vector2){draw_x1, y}, 5,7,0,360,16, Fade(WHITE,0.7f));
+                DrawCircle(draw_x1, y, 3, col);
+            }
+            if (draw_x2 >= GetScreenWidth() - 20.0f) {
+                DrawRing((Vector2){draw_x1 + draw_len, y}, 5,7,0,360,16, Fade(WHITE,0.7f));
+                DrawCircle(draw_x1 + draw_len, y, 3, col);
+            }
+        }
     }
 }
 
