@@ -41,6 +41,7 @@ static const float bar_height     = 14.0f;
 static time_t original_duration = 0;
 static int    g_track_of_event[1024] = {0};
 static double secs_per_pixel = 0.0;
+static time_t track_free_until[50];
 
 #define EDGE_GRAB_PIXELS 16.0f   // use this instead of EDGE_GRAB to avoid conflict
 // ─────────────────────────────────────────────────────────────────────────────
@@ -454,41 +455,28 @@ void DrawEvents(void) {
     const float line_thickness = 2.0f;
     const int   max_tracks     = 50;
 
-    // Update global conversion factor
     secs_per_pixel = (365.25 * 86400.0) / tracker.pixels_per_year;
 
-    // --- Sort events by start time ---
-    int order[tracker.count];
+    // --- Sort events ---
+    int order[MAX_ENTRIES];
     for (int i = 0; i < tracker.count; i++) order[i] = i;
+    for (int i = 0; i < tracker.count - 1; i++)
+        for (int j = i + 1; j < tracker.count; j++)
+            if (tracker.entries[order[i]].start > tracker.entries[order[j]].start)
+                { int tmp = order[i]; order[i] = order[j]; order[j] = tmp; }
 
-    for (int i = 0; i < tracker.count - 1; i++) {
-        for (int j = i + 1; j < tracker.count; j++) {
-            if (tracker.entries[order[i]].start > tracker.entries[order[j]].start) {
-                int tmp = order[i];
-                order[i] = order[j];
-                order[j] = tmp;
-            }
-        }
-    }
-
-    // --- Assign lowest possible track (greedy) ---
-    time_t track_free_until[max_tracks];
+    // --- Reset + assign tracks ---
     for (int t = 0; t < max_tracks; t++) track_free_until[t] = 0;
-
     for (int k = 0; k < tracker.count; k++) {
-        int i = order[k];
-        Entry *e = &tracker.entries[i];
-
+        int i = order[k]; Entry *e = &tracker.entries[i];
         int track = 0;
-        while (track < max_tracks && e->start < track_free_until[track])
-            track++;
-
+        while (track < max_tracks && e->start < track_free_until[track]) track++;
         if (track >= max_tracks) track = max_tracks - 1;
         track_free_until[track] = e->end;
         g_track_of_event[i] = track;
     }
 
-    // --- Draw + handle clicks ---
+    // --- Draw each event ---
     for (int i = 0; i < tracker.count; i++) {
         Entry *e = &tracker.entries[i];
 
@@ -509,23 +497,17 @@ void DrawEvents(void) {
         Rectangle hit = { draw_x1, y - 7, draw_len, 16 };
         bool hovered = CheckCollisionPointRec(mouse, hit);
 
-        // Click → start drag
+        // --- Drag handling ---
         if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON) && hovered && dragging == -1) {
-            selected = i;
-            dragging = i;
-
+            selected = i; dragging = i;
             float rel_x = mouse.x - draw_x1;
             drag_mode = (rel_x < EDGE_GRAB_PIXELS) ? 1 :
                         (rel_x > draw_len - EDGE_GRAB_PIXELS) ? 2 : 0;
 
             time_t cursor_time = tracker.view_start + (time_t)((mouse.x - 100.0f) * secs_per_pixel);
-
             if (drag_mode == 1)      drag_offset = e->start - cursor_time;
             else if (drag_mode == 2) drag_offset = e->end   - cursor_time;
-            else {
-                drag_offset = e->start - cursor_time;
-                original_duration = e->end - e->start;
-            }
+            else { drag_offset = e->start - cursor_time; original_duration = e->end - e->start; }
         }
 
         bool is_selected = (selected == i);
@@ -536,16 +518,31 @@ void DrawEvents(void) {
         else if (is_selected) col = (Color){255,70,70,255};
         else if (hovered)     col = (Color){255,130,130,255};
 
+        // Draw visible bar
         DrawLineEx((Vector2){draw_x1, y}, (Vector2){draw_x1 + draw_len, y}, line_thickness, col);
 
-        // Text
-        if (draw_len >= 40.0f) {
+        // === CLIPPED DRAWING: everything inside this block is clipped to timeline area ===
+        BeginScissorMode(100, 0, GetScreenWidth() - 100, GetScreenHeight());
+
+        // End circles (true positions, naturally clipped)
+        DrawCircle(x_start, y, 5.0f, Fade(WHITE, 0.7f));
+        DrawCircle(x_start, y, 3.0f, col);
+        DrawCircle(draw_x2,  y, 5.0f, Fade(WHITE, 0.7f));
+        DrawCircle(draw_x2,  y, 3.0f, col);
+
+        if (is_selected || is_dragging) {
+            DrawCircle(x_start, y, 6.0f, Fade(YELLOW, 0.4f));
+            DrawCircle(draw_x2,  y, 6.0f, Fade(YELLOW, 0.4f));
+        }
+
+        // Text — now also clipped beautifully when long or off-edge
+        if (draw_len >= 20.0f) {
             const char* name = e->name[0] ? e->name : "Untitled";
             float fs = 12.0f;
             Vector2 ts = MeasureTextEx(font, name, fs, 1.0f);
 
-            static char buf[64];
-            if (ts.x > draw_len - 16.0f) {
+            static char buf[64] = {0};
+            if (ts.x > draw_len - 10.0f) {
                 strncpy(buf, name, 20);
                 strcpy(buf + 20, "...");
                 buf[23] = '\0';
@@ -553,24 +550,15 @@ void DrawEvents(void) {
                 ts = MeasureTextEx(font, name, fs, 1.0f);
             }
 
-            float tx = draw_x1 + (draw_len - ts.x) * 0.5f;
+            float tx = x_start + (duration_px - ts.x) * 0.5f;  // center in full bar
             float ty = y - ts.y * 0.5f - 1.0f;
 
-            DrawTextEx(font, name, (Vector2){tx+1, ty+1}, fs, 1, Fade(BLACK,0.6f));
-            DrawTextEx(font, name, (Vector2){tx,   ty},   fs, 1, WHITE);
+            DrawTextEx(font, name, (Vector2){tx + 1, ty + 1}, fs, 1, Fade(BLACK, 0.6f));
+            DrawTextEx(font, name, (Vector2){tx,     ty},     fs, 1, WHITE);
         }
 
-        // Resize handles
-        if ((hovered || is_selected || is_dragging) && duration_px >= 20.0f) {
-            if (x_start <= 120.0f) {
-                DrawRing((Vector2){draw_x1, y}, 5,7,0,360,16, Fade(WHITE,0.7f));
-                DrawCircle(draw_x1, y, 3, col);
-            }
-            if (draw_x2 >= GetScreenWidth() - 20.0f) {
-                DrawRing((Vector2){draw_x1 + draw_len, y}, 5,7,0,360,16, Fade(WHITE,0.7f));
-                DrawCircle(draw_x1 + draw_len, y, 3, col);
-            }
-        }
+        EndScissorMode();
+        // === End of clipped drawing ===
     }
 }
 
