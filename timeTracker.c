@@ -44,6 +44,8 @@ static double secs_per_pixel = 0.0;
 static time_t track_free_until[50];
 static bool clicked_on_event_this_frame = false;
 
+static const float LEFT_MARGIN = 20.0f;
+
 #define EDGE_GRAB_PIXELS 16.0f   // use this instead of EDGE_GRAB to avoid conflict
 // ─────────────────────────────────────────────────────────────────────────────
 void DrawTextInput(TextInput *ti, Font font);
@@ -190,8 +192,8 @@ void HandleSelectionAndDragging(void) {
     if (dragging == -1) return;
 
     Vector2 mouse = GetMousePosition();
-    time_t cursor_time = tracker.view_start + (time_t)((mouse.x - 100.0f) * secs_per_pixel);
-    Entry *e = &tracker.entries[dragging];
+    time_t cursor_time = tracker.view_start + (time_t)((mouse.x - 0.0f) * secs_per_pixel);
+    Entry *e = &tracker.entries[dragging];        // ← fixed: added ]
 
     if (IsMouseButtonDown(MOUSE_LEFT_BUTTON)) {
         if (drag_mode == 0) {
@@ -264,14 +266,14 @@ void HandleKeyboardShortcuts(void) {
 // Helper function — replaces the C++ lambda
 static struct tm* SafeLocalTime(const time_t* timep) {
     static struct tm tm_buf;
-    localtime_r(timep, &tm_buf);  // thread-safe
+    localtime_r(timep, &tm_buf);
     return &tm_buf;
 }
 
 void DrawTimelineGrid(void)
 {
-    const float left       = 100.0f;
-    const float right      = GetScreenWidth() - 50.0f;
+    const float left       = 0.0f;        // ← changed
+    const float right      = GetScreenWidth();
     const float baseline_y = 260.0f;
 
     double secs_per_pixel = (365.25 * 86400.0) / tracker.pixels_per_year;
@@ -281,7 +283,7 @@ void DrawTimelineGrid(void)
     DrawLineEx((Vector2){left, baseline_y}, (Vector2){right, baseline_y},
                3.0f, (Color){90, 90, 140, 255});
 
-    /* ────────────────────── TODAY LINE ────────────────────── */
+    // TODAY LINE
     time_t now = time(NULL);
     struct tm today = {0};
     localtime_r(&now, &today);
@@ -292,7 +294,7 @@ void DrawTimelineGrid(void)
     double secs = difftime(today_midnight, tracker.view_start);
     float tx = left + (float)(secs / secs_per_pixel);
 
-    if (tx >= left - 200 && tx <= right + 200)
+    if (tx >= -200 && tx <= right + 200)
     {
         DrawLineEx((Vector2){tx, baseline_y - 60}, (Vector2){tx, GetScreenHeight() - 50},
                    4.5f, RED);
@@ -300,7 +302,7 @@ void DrawTimelineGrid(void)
         DrawCircle(tx, baseline_y, 7, (Color){40,10,10,255});
         DrawTextEx(font, "TODAY", (Vector2){tx + 14, baseline_y + 40}, 28, 1.3f, RED);
     }
-
+    
     /* ────────────────────── YEARS — VERTICAL LABELS ONLY (horizontal removed) ────────────────────── */
     if (tracker.pixels_per_year > 30.0)
     {
@@ -448,14 +450,14 @@ void DrawTimelineGrid(void)
 void DrawEvents(void) {
     Vector2 mouse = GetMousePosition();
     const float row_spacing    = 10.0f;
-    const float line_thickness = 3.5f;        // ← thicker = richer look with AA
+    const float line_thickness = 3.5f;
     const int   max_tracks     = 50;
 
     secs_per_pixel = (365.25 * 86400.0) / tracker.pixels_per_year;
 
     clicked_on_event_this_frame = false;
 
-    // --- Sort events ---
+    // Sort events (unchanged)
     int order[MAX_ENTRIES];
     for (int i = 0; i < tracker.count; i++) order[i] = i;
     for (int i = 0; i < tracker.count - 1; i++)
@@ -463,7 +465,7 @@ void DrawEvents(void) {
             if (tracker.entries[order[i]].start > tracker.entries[order[j]].start)
                 { int tmp = order[i]; order[i] = order[j]; order[j] = tmp; }
 
-    // --- Track assignment ---
+    // Track assignment (unchanged)
     for (int t = 0; t < max_tracks; t++) track_free_until[t] = 0;
     for (int k = 0; k < tracker.count; k++) {
         int i = order[k]; Entry *e = &tracker.entries[i];
@@ -474,23 +476,23 @@ void DrawEvents(void) {
         g_track_of_event[i] = track;
     }
 
-    // --- Draw each event ---
+    // Draw each event - now starts at x=0
     for (int i = 0; i < tracker.count; i++) {
         Entry *e = &tracker.entries[i];
 
         double secs_from_view = difftime(e->start, tracker.view_start);
-        float x_start = 100.0f + (float)(secs_from_view * tracker.pixels_per_year / (365.25 * 86400.0));
+        float x_start = (float)(secs_from_view * tracker.pixels_per_year / (365.25 * 86400.0));
         float duration_px = e->duration_years * tracker.pixels_per_year;
         if (duration_px < 2.0f) duration_px = 2.0f;
-        if (x_start > GetScreenWidth() + 200) continue;
 
-        float draw_x1 = fmaxf(x_start, 100.0f);
+        float draw_x1 = fmaxf(x_start, 0.0f);
         float draw_x2 = x_start + duration_px;
         float draw_len = draw_x2 - draw_x1;
         if (draw_len <= 0.0f) continue;
 
         float y = events_start_y + g_track_of_event[i] * row_spacing;
 
+        // Hitbox and interaction (unchanged logic)
         Rectangle hit = { draw_x1, y - 7, draw_len, 16 };
         bool hovered = CheckCollisionPointRec(mouse, hit);
 
@@ -503,41 +505,32 @@ void DrawEvents(void) {
             drag_mode = (rel_x < EDGE_GRAB_PIXELS) ? 1 :
                         (rel_x > draw_len - EDGE_GRAB_PIXELS) ? 2 : 0;
 
-            time_t cursor_time = tracker.view_start + (time_t)((mouse.x - 100.0f) * secs_per_pixel);
+            time_t cursor_time = tracker.view_start + (time_t)((mouse.x - 0.0f) * secs_per_pixel);  // ← changed 100→0
             if (drag_mode == 1)      drag_offset = e->start - cursor_time;
             else if (drag_mode == 2) drag_offset = e->end   - cursor_time;
             else { drag_offset = e->start - cursor_time; original_duration = e->end - e->start; }
         }
 
+        // Colors (unchanged)
         bool is_selected = (selected == i);
         bool is_dragging = (dragging == i);
+        Color col = is_dragging ? (Color){255,100,100,255} :
+                    is_selected ? (Color){255,70,70,255} :
+                    hovered     ? (Color){255,130,130,255} : (Color){240,40,40,255};
 
-        Color col = (Color){240, 40, 40, 255};
-        if (is_dragging)      col = (Color){255,100,100,255};
-        else if (is_selected) col = (Color){255,70,70,255};
-        else if (hovered)     col = (Color){255,130,130,255};
-
-        // Main bar
         DrawLineEx((Vector2){draw_x1, y}, (Vector2){draw_x1 + draw_len, y}, line_thickness, col);
 
-        // ───── CLIPPED: circles + text (smooth & clipped perfectly) ─────
-        BeginScissorMode(100, 0, GetScreenWidth() - 100, GetScreenHeight());
-
-        // LEFT END — beautiful anti-aliased rings
+        // Rings + text (no scissor here anymore)
         DrawRing((Vector2){x_start, y}, 4.6f, 5.4f, 0, 360, 32, Fade(WHITE, 0.75f));
         DrawRing((Vector2){x_start, y}, 2.6f, 3.4f, 0, 360, 32, col);
-
-        // RIGHT END
         DrawRing((Vector2){draw_x2, y}, 4.6f, 5.4f, 0, 360, 32, Fade(WHITE, 0.75f));
         DrawRing((Vector2){draw_x2, y}, 2.6f, 3.4f, 0, 360, 32, col);
 
-        // Selection glow
         if (is_selected || is_dragging) {
             DrawRing((Vector2){x_start, y}, 5.8f, 6.8f, 0, 360, 32, Fade(YELLOW, 0.45f));
             DrawRing((Vector2){draw_x2, y}, 5.8f, 6.8f, 0, 360, 32, Fade(YELLOW, 0.45f));
         }
 
-        // Text — centered, clipped, smooth
         if (draw_len >= 20.0f) {
             const char* name = e->name[0] ? e->name : "Untitled";
             float fs = 12.0f;
@@ -555,11 +548,8 @@ void DrawEvents(void) {
             DrawTextEx(font, name, (Vector2){tx + 1, ty + 1}, fs, 1, Fade(BLACK, 0.6f));
             DrawTextEx(font, name, (Vector2){tx,     ty},     fs, 1, WHITE);
         }
-
-        EndScissorMode();
     }
 
-    // Deselect when clicking empty space
     if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON) && !clicked_on_event_this_frame && selected >= 0) {
         selected = -1;
         dragging = -1;
@@ -592,7 +582,7 @@ void DrawUI(void) {
 static float TextWidthUpTo(Font font, const char *text, int count, float size, float spacing) {
     if (count <= 0) return 0;
     char tmp[MAX_INPUT];
-    int len = (int)fmin(count, strlen(text));
+    int len = (int)fminf(count, strlen(text));
     strncpy(tmp, text, len); tmp[len] = '\0';
     return MeasureTextEx(font, tmp, size, spacing).x;
 }
@@ -646,6 +636,7 @@ void UpdateTextInput(TextInput *ti, Font font) {
     if (IsKeyPressed(KEY_HOME)) ti->cursor_pos = 0;
     if (IsKeyPressed(KEY_END)) ti->cursor_pos = strlen(ti->text);
 }
+
 int main(void) {
     const int W = 1500, H = 900;
 
@@ -714,22 +705,15 @@ int main(void) {
 BeginDrawing();
     ClearBackground((Color){12, 12, 28, 255});
 
-    // ───── CORRECT LEFT-SIDE CLIPPING (fixes cutoff bug forever) ─────
-    const int LEFT_MARGIN = 100;
-    BeginScissorMode(LEFT_MARGIN, 0, GetScreenWidth() - LEFT_MARGIN, GetScreenHeight());
+    // Full width from x=0
+    BeginScissorMode(0, (int)timeline_y, GetScreenWidth(), GetScreenHeight() - (int)timeline_y);
 
-    // Now everything inside here respects the timeline area and can go left of x=100
-    DrawTimelineGrid();   // month ticks + year lines now work when panned left
-    DrawEvents();         // events + circles no longer cut off
+    DrawTimelineGrid();
+    DrawEvents();      // now draws from pixel 0
 
     EndScissorMode();
-    // ─────────────────────────────────────────────────────────────────────
 
-    // UI and year labels are drawn AFTER scissor → always visible
-    DrawUI();             // your top bar, inputs, buttons, etc.
-
-    // Draw year labels on top (they belong to the timeline but must not be clipped)
-
+    DrawUI();          // UI always on top
     DrawFPS(10, 10);
 EndDrawing();
     }
