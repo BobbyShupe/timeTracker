@@ -272,7 +272,7 @@ static struct tm* SafeLocalTime(const time_t* timep) {
 
 void DrawTimelineGrid(void)
 {
-    const float left       = 0.0f;        // ← changed
+    const float left       = 0.0f;
     const float right      = GetScreenWidth();
     const float baseline_y = 260.0f;
 
@@ -283,7 +283,7 @@ void DrawTimelineGrid(void)
     DrawLineEx((Vector2){left, baseline_y}, (Vector2){right, baseline_y},
                3.0f, (Color){90, 90, 140, 255});
 
-    // TODAY LINE
+    /* ────────────────────── TODAY LINE ────────────────────── */
     time_t now = time(NULL);
     struct tm today = {0};
     localtime_r(&now, &today);
@@ -294,7 +294,7 @@ void DrawTimelineGrid(void)
     double secs = difftime(today_midnight, tracker.view_start);
     float tx = left + (float)(secs / secs_per_pixel);
 
-    if (tx >= -200 && tx <= right + 200)
+    if (tx >= left - 200 && tx <= right + 200)
     {
         DrawLineEx((Vector2){tx, baseline_y - 60}, (Vector2){tx, GetScreenHeight() - 50},
                    4.5f, RED);
@@ -302,54 +302,59 @@ void DrawTimelineGrid(void)
         DrawCircle(tx, baseline_y, 7, (Color){40,10,10,255});
         DrawTextEx(font, "TODAY", (Vector2){tx + 14, baseline_y + 40}, 28, 1.3f, RED);
     }
-    
-    /* ────────────────────── YEARS — VERTICAL LABELS ONLY (horizontal removed) ────────────────────── */
-    if (tracker.pixels_per_year > 30.0)
+
+/* ────────────────────── VERTICAL YEAR LABELS – FULL YYYY + CLEAN SPACING ────────────────────── */
+if (tracker.pixels_per_year > 30.0f)
+{
+    struct tm start_tm = {0};
+    localtime_r(&tracker.view_start, &start_tm);
+    start_tm.tm_year -= 50;
+    start_tm.tm_mon = 0;
+    start_tm.tm_mday = 1;
+    start_tm.tm_isdst = -1;
+    mktime(&start_tm);
+    int year = start_tm.tm_year + 1900;
+
+    int end_year = SafeLocalTime(&view_end)->tm_year + 1900 + 50;
+
+    for (; year <= end_year; ++year)
     {
-        struct tm start_tm = {0};
-        localtime_r(&tracker.view_start, &start_tm);
-        start_tm.tm_year -= 50;
-        start_tm.tm_mon = 0;
-        start_tm.tm_mday = 1;
-        start_tm.tm_isdst = -1;
-        mktime(&start_tm);
-        int year = start_tm.tm_year + 1900;
+        struct tm ytm = {0};
+        ytm.tm_year = year - 1900;
+        ytm.tm_mon  = 0;
+        ytm.tm_mday = 1;
+        ytm.tm_isdst = -1;
+        time_t yt = mktime(&ytm);
 
-        int end_year = SafeLocalTime(&view_end)->tm_year + 1900 + 50;
+        double secs = difftime(yt, tracker.view_start);
+        float x = left + (float)(secs / secs_per_pixel);
 
-        for (; year <= end_year; ++year)
-        {
-            struct tm ytm = {0};
-            ytm.tm_year = year - 1900;
-            ytm.tm_mon  = 0;
-            ytm.tm_mday = 1;
-            ytm.tm_isdst = -1;
-            time_t yt = mktime(&ytm);
+        if (x < left - 600 || x > right + 600) continue;
 
-            double secs = difftime(yt, tracker.view_start);
-            float x = left + (float)(secs / secs_per_pixel);
+        // Tick
+        DrawLineEx((Vector2){x, baseline_y - 28},
+                   (Vector2){x, baseline_y + 28}, 4.0f, WHITE);
 
-            if (x < left - 600 || x > right + 600) continue;
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%d", year);
 
-            // Tick
-            DrawLineEx((Vector2){x, baseline_y - 28},
-                       (Vector2){x, baseline_y + 28}, 4.0f, WHITE);
+        const float fontSize = 36.0f;
+        Vector2 textSize = MeasureTextEx(font, buf, fontSize, 1.5f);
 
-            // Vertical label only — no horizontal top label anymore
-            char buf[16];
-            snprintf(buf, sizeof(buf), "%d", year);
-            const float LABEL_Y = baseline_y - 160.0f;
+        // NEW STRATEGY: Move the entire label higher up (above the month area)
+        // We place the TOP of the text at y = baseline_y - 210
+float top_of_text_y = baseline_y - 200.0f;        // original beautiful position
+float y_origin = top_of_text_y + textSize.y;     // full 4 digits visible
 
-            DrawTextPro(font, buf,
-                        (Vector2){x + 16, LABEL_Y},
-                        (Vector2){0, 0},
-                        90.0f, 36, 1.5f, WHITE);
-        }
+DrawTextPro(font, buf,
+            (Vector2){x + 16, y_origin},
+            (Vector2){0, 0},
+            90.0f, 36.0f, 1.5f, WHITE);
     }
+}
 
-    // Month and day grids remain unchanged...
-    // (rest of the function is identical to your original)
-    if (tracker.pixels_per_year > 250.0)
+    /* ────────────────────── MONTH & DAY GRIDS (unchanged) ────────────────────── */
+    if (tracker.pixels_per_year > 250.0f)
     {
         struct tm tmp = {0};
         localtime_r(&tracker.view_start, &tmp);
@@ -383,7 +388,7 @@ void DrawTimelineGrid(void)
                 char label[16];
                 strftime(label, sizeof(label), "%b", mtm);
                 DrawTextPro(font, label,
-                            (Vector2){x + 10, baseline_y - 52},
+                            (Vector2){x + 10, baseline_y - 65},
                             (Vector2){0,0}, 90.0f, 17, 1.2f, Fade(WHITE, 0.9f));
             }
 
@@ -394,7 +399,7 @@ void DrawTimelineGrid(void)
         }
     }
 
-    if (tracker.pixels_per_year > 3000.0)
+    if (tracker.pixels_per_year > 3000.0f)
     {
         struct tm tmp = {0};
         localtime_r(&tracker.view_start, &tmp);
@@ -430,7 +435,7 @@ void DrawTimelineGrid(void)
                 DrawLineEx((Vector2){x, baseline_y - height},
                            (Vector2){x, baseline_y + 10}, thickness, col);
 
-                if (is_month_start || is_week_divider || tracker.pixels_per_year > 20000.0)
+                if (is_month_start || is_week_divider || tracker.pixels_per_year > 20000.0f)
                 {
                     char buf[16];
                     snprintf(buf, sizeof(buf), "%d", day);
@@ -705,15 +710,16 @@ int main(void) {
 BeginDrawing();
     ClearBackground((Color){12, 12, 28, 255});
 
-    // Full width from x=0
+    // ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
+    // 1. Draw UI FIRST (so year labels can appear on top)
+    DrawUI();                     // ← moved up here
+    // 2. Then draw the timeline (year labels will be on top)
     BeginScissorMode(0, (int)timeline_y, GetScreenWidth(), GetScreenHeight() - (int)timeline_y);
-
-    DrawTimelineGrid();
-    DrawEvents();      // now draws from pixel 0
-
+               // year labels now on top of everything
+        DrawEvents();
     EndScissorMode();
-
-    DrawUI();          // UI always on top
+DrawTimelineGrid();
+    // 3. FPS stays last (always visible)
     DrawFPS(10, 10);
 EndDrawing();
     }
