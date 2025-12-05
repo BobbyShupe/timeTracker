@@ -43,6 +43,7 @@ static int    g_track_of_event[1024] = {0};
 static double secs_per_pixel = 0.0;
 static time_t track_free_until[50];
 static bool clicked_on_event_this_frame = false;
+static bool dual_zoom_active = false;  // add this line
 
 static const float LEFT_MARGIN = 20.0f;
 
@@ -122,69 +123,101 @@ void ApplyInputsToSelected(void) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Input Handling
+// Input Handling – FULLY FIXED VERSION
 // ─────────────────────────────────────────────────────────────────────────────
 void HandlePanningAndZooming(void)
 {
     const float left = 100.0f;
-    double secs_per_pixel = (365.25 * 86400.0) / tracker.pixels_per_year;
+    double secs_per_pixel_local = (365.25 * 86400.0) / tracker.pixels_per_year;
+    secs_per_pixel = secs_per_pixel_local;
 
-    // ───── INFINITE CENTER-LOCKED PANNING (cursor stays in middle) ─────
-    static bool panning = false;
     Vector2 screen_center = { GetScreenWidth() / 2.0f, GetScreenHeight() / 2.0f };
+    bool both_buttons = IsMouseButtonDown(MOUSE_LEFT_BUTTON) && IsMouseButtonDown(MOUSE_RIGHT_BUTTON);
 
-    if (IsMouseButtonDown(MOUSE_RIGHT_BUTTON))
+    static bool panning = false;
+    static bool dual_zoom_active = false;
+
+    // ───── PANNING (Right button only) ─────
+    if (IsMouseButtonDown(MOUSE_RIGHT_BUTTON) && !both_buttons)
     {
         if (!panning)
         {
-            // First frame: lock cursor to center
             panning = true;
             HideCursor();
             SetMousePosition((int)screen_center.x, (int)screen_center.y);
-
         }
         else
         {
-            // Read current (centered) mouse position
             Vector2 mouse = GetMousePosition();
             Vector2 delta = { mouse.x - screen_center.x, mouse.y - screen_center.y };
 
-            // Apply movement (only horizontal matters for timeline)
             if (fabsf(delta.x) > 0.1f)
-            {
-                tracker.view_start -= (time_t)(delta.x * secs_per_pixel);
-            }
+                tracker.view_start -= (time_t)(delta.x * secs_per_pixel_local);
 
-            // Immediately snap cursor back to center
             SetMousePosition((int)screen_center.x, (int)screen_center.y);
         }
     }
-    else
+    else if (panning)
     {
-        if (panning)
-        {
-            panning = false;
-            ShowCursor();
-        }
+        panning = false;
+        ShowCursor();
     }
 
-    // ───── ZOOM (unchanged — still perfect) ─────
+    // ───── DUAL-BUTTON ZOOM (Left + Right = zoom with hidden centered cursor) ─────
+    if (both_buttons)
+    {
+        if (!dual_zoom_active)
+        {
+            dual_zoom_active = true;
+            HideCursor();
+            SetMousePosition((int)screen_center.x, (int)screen_center.y);
+        }
+        else
+        {
+            Vector2 mouse = GetMousePosition();
+            float dy = mouse.y - screen_center.y;  // vertical movement from center
+
+            if (fabsf(dy) > 2.0f)
+            {
+                time_t time_under_mouse = tracker.view_start + (time_t)((mouse.x - left) * secs_per_pixel_local);
+
+                float speed = 0.012f;  // tweak this for faster/slower zoom
+                double zoom_factor = powf(1.25, dy * speed);
+
+                tracker.pixels_per_year *= zoom_factor;
+                tracker.pixels_per_year = fmaxf(20.0, fminf(tracker.pixels_per_year, 2000000.0));
+
+                secs_per_pixel_local = (365.25 * 86400.0) / tracker.pixels_per_year;
+                secs_per_pixel = secs_per_pixel_local;
+
+                tracker.view_start = time_under_mouse - (time_t)((mouse.x - left) * secs_per_pixel_local);
+
+                SetMousePosition((int)screen_center.x, (int)screen_center.y);  // keep locked
+            }
+        }
+    }
+    else if (dual_zoom_active)
+    {
+        dual_zoom_active = false;
+        ShowCursor();
+    }
+
+    // ───── MOUSE WHEEL ZOOM (unchanged) ─────
     float wheel = GetMouseWheelMoveV().y;
     if (wheel == 0.0f) wheel = GetMouseWheelMove();
-
     if (wheel != 0.0f)
     {
         Vector2 mouse = GetMousePosition();
-        time_t time_under_mouse = tracker.view_start + (time_t)((mouse.x - left) * secs_per_pixel);
+        time_t time_under_mouse = tracker.view_start + (time_t)((mouse.x - left) * secs_per_pixel_local);
 
         double zoom_factor = (wheel > 0) ? 1.25 : 0.80;
         tracker.pixels_per_year *= zoom_factor;
+        tracker.pixels_per_year = fmaxf(20.0, fminf(tracker.pixels_per_year, 2000000.0));
 
-        if (tracker.pixels_per_year < 20.0)     tracker.pixels_per_year = 20.0;
-        if (tracker.pixels_per_year > 2000000.0) tracker.pixels_per_year = 2000000.0;
+        secs_per_pixel_local = (365.25 * 86400.0) / tracker.pixels_per_year;
+        secs_per_pixel = secs_per_pixel_local;
 
-        secs_per_pixel = (365.25 * 86400.0) / tracker.pixels_per_year;
-        tracker.view_start = time_under_mouse - (time_t)((mouse.x - left) * secs_per_pixel);
+        tracker.view_start = time_under_mouse - (time_t)((mouse.x - left) * secs_per_pixel_local);
     }
 }
 
