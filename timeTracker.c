@@ -669,6 +669,28 @@ void UpdateTextInput(TextInput *ti, Font font) {
     }
     if (IsKeyPressed(KEY_BACKSPACE) && ti->cursor_pos > 0) { memmove(ti->text + ti->cursor_pos - 1, ti->text + ti->cursor_pos, strlen(ti->text + ti->cursor_pos) + 1); ti->cursor_pos--; }
     if (IsKeyPressed(KEY_DELETE) && ti->cursor_pos < (int)strlen(ti->text)) { memmove(ti->text + ti->cursor_pos, ti->text + ti->cursor_pos + 1, strlen(ti->text + ti->cursor_pos + 1) + 1); }
+    // ───── PASTE SUPPORT (Ctrl+V) ─────
+    if (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL))
+    {
+        if (IsKeyPressed(KEY_V))
+        {
+            const char *clipboard = GetClipboardText();
+            if (clipboard)
+            {
+                int len = (int)strlen(clipboard);
+                int space_left = MAX_INPUT - 1 - strlen(ti->text);
+                if (space_left > 0)
+                {
+                    if (len > space_left) len = space_left;
+                    memmove(ti->text + ti->cursor_pos + len, ti->text + ti->cursor_pos,
+                            strlen(ti->text + ti->cursor_pos) + 1);
+                    memcpy(ti->text + ti->cursor_pos, clipboard, len);
+                    ti->cursor_pos += len;
+                    ti->text[MAX_INPUT-1] = '\0';
+                }
+            }
+        }
+    }
     if (IsKeyPressed(KEY_LEFT) && ti->cursor_pos > 0) ti->cursor_pos--;
     if (IsKeyPressed(KEY_RIGHT) && ti->cursor_pos < (int)strlen(ti->text)) ti->cursor_pos++;
     if (IsKeyPressed(KEY_HOME)) ti->cursor_pos = 0;
