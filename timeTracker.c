@@ -597,63 +597,7 @@ void DrawEvents(void)
             DrawRing((Vector2){x_start, y}, 5.8f, 6.8f, 0, 360, 32, Fade(YELLOW, 0.45f));
             DrawRing((Vector2){draw_x2, y}, 5.8f, 6.8f, 0, 360, 32, Fade(YELLOW, 0.45f));
         }
-
-        // NAME — FULL TEXT EVEN FOR TINY EVENTS (TOOLTIP-STYLE)
-        if (hovered) {
-            const char* name = e->name[0] ? e->name : "Untitled";
-            float fs = 12.0f;
-
-            // Determine visible bar segment
-            float visible_left  = fmaxf(x_start, 0.0f);
-            float visible_right = fminf(x_start + duration_px, (float)GetScreenWidth());
-            float visible_width = visible_right - visible_left;
-
-            if (visible_width < 20.0f) {
-                // Ultra-tiny sliver → just show dots (still clickable)
-                DrawTextEx(font, "...", (Vector2){visible_left + 4, y - 7}, fs, 1.0f, WHITE);
-            } else {
-                // Measure FULL name (no truncation for display)
-                Vector2 full_size = MeasureTextEx(font, name, fs, 1.0f);
-                const char* display = name;  // Always use full text
-
-                // Center text position within visible segment (for short bars)
-                float textX = visible_left + (visible_width - full_size.x) * 0.5f;
-                float textY = y - 7;
-
-                // If bar is too narrow for full text, expand box horizontally
-                bool needs_expand = (full_size.x > visible_width - 10.0f);
-                float box_width = needs_expand ? full_size.x + 12.0f : visible_width;
-                float box_left = needs_expand ? 
-                    visible_left + (visible_width - box_width) * 0.5f :  // Center expanded box
-                    visible_left;
-
-                // Final clamp: keep box on screen
-                if (needs_expand) {
-                    box_left = fmaxf(box_left, 8.0f);
-                    box_left = fminf(box_left, GetScreenWidth() - box_width - 8.0f);
-                } else {
-                    textX = fmaxf(textX, 8.0f);
-                    textX = fminf(textX, GetScreenWidth() - full_size.x - 8.0f);
-                }
-
-                // Background rectangle (solid black + padding + rounded)
-                const float pad = 6.0f;
-                Rectangle bg = {
-                    box_left - pad,
-                    textY - pad,
-                    box_width + pad * 2,
-                    full_size.y + pad * 2
-                };
-
-                // Draw background (black, slightly rounded)
-                DrawRectangleRounded(bg, 0.35f, 12, (Color){0, 0, 0, 230});
-                DrawRectangleRoundedLinesEx(bg, 0.35f, 12, 1.5f, (Color){80, 80, 80, 255});
-
-                // Draw text (white with black shadow for max contrast)
-                DrawTextEx(font, display, (Vector2){box_left + 1, textY + 1}, fs, 1.0f, Fade(BLACK, 0.7f));
-                DrawTextEx(font, display, (Vector2){box_left,     textY},     fs, 1.0f, WHITE);
-            }
-        }                        
+                                
         // TOOLTIP
         if (hovered && e->description[0]) {
             strncpy(g_tooltip_text, e->description, 511);
@@ -1000,6 +944,66 @@ void DrawStatusBar(void)
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Draw hovered event name ON TOP of everything (including cursor & tooltip)
+// ─────────────────────────────────────────────────────────────────────────────
+void DrawHoveredEventNameOnTop(void)
+{
+    Vector2 mouse = GetMousePosition();
+    if (mouse.y < timeline_y) return;
+
+    // Reuse the same hover detection logic from DrawEvents()
+    for (int i = 0; i < tracker.count; i++) {
+        Entry *e = &tracker.entries[i];
+
+        double secs_from_view = difftime(e->start, tracker.view_start);
+        float x_start = (float)(secs_from_view * tracker.pixels_per_year / (365.25 * 86400.0));
+        float duration_px = e->duration_years * tracker.pixels_per_year;
+        if (duration_px < 2.0f) duration_px = 2.0f;
+
+        float draw_x1 = fmaxf(x_start, 0.0f);
+        float draw_len = fminf(x_start + duration_px, GetScreenWidth()) - draw_x1;
+        if (draw_len <= 0.0f) continue;
+
+        float y = events_start_y + g_track_of_event[i] * 10.0f;
+        Rectangle hit = { draw_x1, y - 7, draw_len, 16 };
+        bool hovered = CheckCollisionPointRec(mouse, hit);
+
+        if (hovered) {
+            const char* name = e->name[0] ? e->name : "Untitled";
+            float fs = 13.0f;
+
+            Vector2 full_size = MeasureTextEx(font, name, fs, 1.0f);
+            float visible_width = draw_len;
+
+            bool needs_expand = (full_size.x > visible_width - 10.0f);
+            float box_width = needs_expand ? full_size.x + 16.0f : visible_width;
+            float box_left = needs_expand ?
+                draw_x1 + (visible_width - box_width) * 0.5f :
+                draw_x1;
+
+            // Clamp to screen
+            if (box_left < 10) box_left = 10;
+            if (box_left + box_width > GetScreenWidth() - 10)
+                box_left = GetScreenWidth() - box_width - 10;
+
+            float textY = y - 7;
+            float pad = 7.0f;
+            Rectangle bg = { box_left - pad, textY - pad, box_width + pad*2, full_size.y + pad*2 };
+
+            // Draw background + border
+            DrawRectangleRounded(bg, 0.4f, 12, (Color){0, 0, 0, 240});
+            DrawRectangleRoundedLinesEx(bg, 0.4f, 12, 2.0f, (Color){100, 180, 255, 255});
+
+            // Draw name with shadow
+            DrawTextEx(font, name, (Vector2){box_left + 1, textY + 1}, fs, 1.0f, Fade(BLACK, 0.8f));
+            DrawTextEx(font, name, (Vector2){box_left,     textY},     fs, 1.0f, WHITE);
+
+            break;  // only one event can be hovered
+        }
+    }
+}
+
 int main(void) {
     const int W = 1500, H = 900;
 
@@ -1086,6 +1090,7 @@ int main(void) {
             DrawCursorIndicator();
             DrawGlobalTooltip();                        // ← last = solid & on top
             DrawStatusBar();
+            DrawHoveredEventNameOnTop();
             DrawFPS(10, 10);
         EndDrawing();
     }
