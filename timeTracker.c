@@ -138,74 +138,77 @@
       }
   }
   
-  void HandlePanningAndZooming(void)
-  {
-      secs_per_pixel = (365.25 * 86400.0) / tracker.pixels_per_year;
-  
-      Vector2 mouse  = GetMousePosition();
-      Vector2 center  = { GetScreenWidth() / 2.0f, GetScreenHeight() / 2.0f };
-  
-      static bool panning      = false;
-      static bool dual_zooming = false;
-  
-      bool left_down  = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
-      bool right_down = IsMouseButtonDown(MOUSE_BUTTON_RIGHT);
-      bool both_down  = left_down && right_down;
-  
-      // ───── RIGHT-CLICK PANNING (WORKS 100%) ─────
-      if (right_down && !both_down) {
-          if (!panning) {
-              panning = true;
-              HideCursor();
-              SetMousePosition((int)center.x, (int)center.y);
-          } else {
-              Vector2 current = GetMousePosition();
-              float delta_x = current.x - center.x;
-              if (fabsf(delta_x) > 1.0f) {
-                  tracker.view_start -= (time_t)(delta_x * secs_per_pixel);
-              }
-              SetMousePosition((int)center.x, (int)center.y);
-          }
-      } else if (panning) {
-          panning = false;
-          ShowCursor();
-      }
-  
-      // ───── LEFT + RIGHT = ZOOM ─────
-      if (both_down) {
-          if (!dual_zooming) {
-              dual_zooming = true;
-              HideCursor();
-              SetMousePosition((int)center.x, (int)center.y);
-          } else {
-              Vector2 current = GetMousePosition();
-              float dy = current.y - center.y;
-              if (fabsf(dy) > 2.0f) {
-                  time_t time_under = tracker.view_start + (time_t)((current.x - 100.0f) * secs_per_pixel);
-                  double factor = pow(1.25, dy * 0.012);
-                  tracker.pixels_per_year *= factor;
-                  tracker.pixels_per_year = fmax(20.0, fmin(tracker.pixels_per_year, 2000000.0));
-                  secs_per_pixel = (365.25 * 86400.0) / tracker.pixels_per_year;
-                  tracker.view_start = time_under - (time_t)((current.x - 100.0f) * secs_per_pixel);
-                  SetMousePosition((int)center.x, (int)center.y);
-              }
-          }
-      } else if (dual_zooming) {
-          dual_zooming = false;
-          ShowCursor();
-      }
-  
-      // ───── MOUSE WHEEL ZOOM ─────
-      float wheel = GetMouseWheelMove();
-      if (wheel != 0.0f) {
-          time_t time_under = tracker.view_start + (time_t)((mouse.x - 100.0f) * secs_per_pixel);
-          double factor = (wheel > 0) ? 1.25 : 0.80;
-          tracker.pixels_per_year *= factor;
-          tracker.pixels_per_year = fmax(20.0, fmin(tracker.pixels_per_year, 2000000.0));
-          secs_per_pixel = (365.25 * 86400.0) / tracker.pixels_per_year;
-          tracker.view_start = time_under - (time_t)((mouse.x - 100.0f) * secs_per_pixel);
-      }
-  }
+void HandlePanningAndZooming(void)
+{
+    secs_per_pixel = (365.25 * 86400.0) / tracker.pixels_per_year;
+    Vector2 mouse = GetMousePosition();
+
+    static bool panning      = false;
+    static bool scroll_zoom  = false;
+    static Vector2 pan_start_pos   = {0};
+    static Vector2 zoom_start_pos  = {0};
+    static time_t  zoom_anchor_time = 0;
+
+    bool left_down  = IsMouseButtonDown(MOUSE_LEFT_BUTTON);
+    bool right_down = IsMouseButtonDown(MOUSE_RIGHT_BUTTON);
+    bool both_down  = left_down && right_down;
+
+    // ───── SCROLL-TO-ZOOM (Left + Right drag vertically) ─────
+    if (both_down) {
+        if (!scroll_zoom) {
+            scroll_zoom = true;
+            zoom_start_pos = mouse;
+            zoom_anchor_time = tracker.view_start + (time_t)((mouse.x - 100.0f) * secs_per_pixel);
+            HideCursor();
+        } else {
+            float dy = mouse.y - zoom_start_pos.y;
+            if (fabsf(dy) > 2.0f) {
+                double factor = powf(1.25f, dy * 0.015f);  // smooth & responsive
+                tracker.pixels_per_year *= factor;
+                tracker.pixels_per_year = fmaxf(20.0f, fminf(tracker.pixels_per_year, 2000000.0f));
+                secs_per_pixel = (365.25 * 86400.0) / tracker.pixels_per_year;
+
+                // Keep the time under the original click point stable
+                tracker.view_start = zoom_anchor_time - (time_t)((mouse.x - 100.0f) * secs_per_pixel);
+
+                // Snap cursor back to original click position
+                SetMousePosition((int)zoom_start_pos.x, (int)zoom_start_pos.y);
+            }
+        }
+    } else if (scroll_zoom) {
+        scroll_zoom = false;
+        ShowCursor();
+    }
+
+    // ───── PANNING (Right-click only) ─────
+    else if (right_down) {
+        if (!panning) {
+            panning = true;
+            pan_start_pos = mouse;
+            HideCursor();
+        } else {
+            float dx = mouse.x - pan_start_pos.x;
+            if (fabsf(dx) > 1.0f) {
+                tracker.view_start -= (time_t)(dx * secs_per_pixel);
+                SetMousePosition((int)pan_start_pos.x, (int)pan_start_pos.y);
+            }
+        }
+    } else if (panning) {
+        panning = false;
+        ShowCursor();
+    }
+
+    // ───── MOUSE WHEEL ZOOM (unchanged) ─────
+    float wheel = GetMouseWheelMove();
+    if (wheel != 0.0f) {
+        time_t time_under = tracker.view_start + (time_t)((mouse.x - 100.0f) * secs_per_pixel);
+        double factor = (wheel > 0) ? 1.25 : 0.80;
+        tracker.pixels_per_year *= factor;
+        tracker.pixels_per_year = fmaxf(20.0f, fminf(tracker.pixels_per_year, 2000000.0f));
+        secs_per_pixel = (365.25 * 86400.0) / tracker.pixels_per_year;
+        tracker.view_start = time_under - (time_t)((mouse.x - 100.0f) * secs_per_pixel);
+    }
+}
   
   void HandleSelectionAndDragging(void) {
       if (dragging == -1) return;
@@ -1005,9 +1008,11 @@ void DrawHoveredEventNameOnTop(void)
 }
 
 int main(void) {
-    const int W = 1500, H = 900;
+    //const int W = 1500, H = 900;
 
-    InitWindow(W, H, "Lifetime Visual Time Tracker");
+	InitWindow(0, 0, "Lifetime Visual Time Tracker");
+	SetWindowState(FLAG_FULLSCREEN_MODE);
+	ToggleBorderlessWindowed();  // Optional: removes any border flicker on some systems
     SetTargetFPS(60);
 
     // ────────────────────── YOUR ORIGINAL FONT (exactly as you had it) ──────────────────────
