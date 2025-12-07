@@ -475,6 +475,38 @@
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// MINIMAL & SMOOTH cursor indicator – no snapping, no arrow, pure elegance
+// ─────────────────────────────────────────────────────────────────────────────
+void DrawCursorIndicator(void)
+{
+    Vector2 mouse = GetMousePosition();
+    if (mouse.y < timeline_y) return;
+
+    double secs_per_pixel = (365.25 * 86400.0) / tracker.pixels_per_year;
+    time_t cursor_time = tracker.view_start + (time_t)(mouse.x * secs_per_pixel);
+
+    double secs_from_view = difftime(cursor_time, tracker.view_start);
+    float x = (float)(secs_from_view * tracker.pixels_per_year / (365.25 * 86400.0));
+
+    if (x < -100 || x > GetScreenWidth() + 100) return;
+
+    const float timeline_y_center = 260.0f;
+
+    // ── Subtle full-height vertical line
+    DrawLineEx(
+        (Vector2){x, timeline_y},
+        (Vector2){x, GetScreenHeight() - 40.0f},
+        1.4f,
+        (Color){255, 255, 255, 70}
+    );
+
+    // ── Clean glowing dot on the timeline (no arrow, just pure focus)
+    DrawCircle(x, timeline_y_center, 6.0f, (Color){30, 80, 160, 200});
+    DrawCircle(x, timeline_y_center, 4.0f, (Color){100, 200, 255, 255});
+    DrawCircle(x, timeline_y_center, 2.0f, (Color){180, 240, 255, 255});
+}
+
 void DrawEvents(void)
 {
     Vector2 mouse = GetMousePosition();
@@ -904,6 +936,70 @@ void UpdateTextInput(TextInput *ti, Font font) {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// MINIMAL & ROCK-STABLE status bar – only MM/DD/YYYY + time + zoom
+// ─────────────────────────────────────────────────────────────────────────────
+void DrawStatusBar(void)
+{
+    const float bar_y = GetScreenHeight() - 40.0f;
+    const float bar_h = 40.0f;
+    DrawRectangle(0, (int)bar_y, GetScreenWidth(), (int)bar_h, (Color){15, 15, 35, 255});
+    DrawLine(0, (int)bar_y, GetScreenWidth(), (int)bar_y, (Color){70, 70, 120, 255});
+
+    Vector2 mouse = GetMousePosition();
+    if (mouse.y < timeline_y) return;
+
+    double secs_per_pixel = (365.25 * 86400.0) / tracker.pixels_per_year;
+    time_t cursor_time = tracker.view_start + (time_t)(mouse.x * secs_per_pixel);
+    struct tm *tm = SafeLocalTime(&cursor_time);
+
+    const float base_y = bar_y + 11.0f;
+
+    // Fixed positions – everything locked in place
+    const float date_x  = 10.0f;   // MM/DD/YYYY
+    const float time_x  = 180.0f;  // Time (only when zoomed)
+
+    // ── MM/DD/YYYY (fixed position, fixed width → zero jitter) ─────
+    char date_str[12];
+    strftime(date_str, sizeof(date_str), "%m-%d-%Y", tm);
+    DrawTextEx(font, date_str, (Vector2){date_x, base_y}, 24, 1.0f, (Color){100, 220, 255, 255});
+
+    // ── Time (appears only when zoomed in enough) ──────────────────
+    if (tracker.pixels_per_year > 4000.0) {
+        char time_str[16];
+        if (tracker.pixels_per_year > 15000.0)
+            strftime(time_str, sizeof(time_str), "%H:%M:%S", tm);
+        else
+            strftime(time_str, sizeof(time_str), "%H:%M", tm);
+
+        DrawTextEx(font, time_str, (Vector2){time_x, base_y}, 24, 1.0f, (Color){255, 140, 140, 255});
+    }
+
+    // ── Zoom level (right-aligned, stable) ────────────────────────
+    char zoom_str[32];
+    if (tracker.pixels_per_year >= 1e6)
+        snprintf(zoom_str, sizeof(zoom_str), "%.2fM px/yr", tracker.pixels_per_year / 1e6);
+    else if (tracker.pixels_per_year >= 1000.0)
+        snprintf(zoom_str, sizeof(zoom_str), "%.1fk px/yr", tracker.pixels_per_year / 1000.0);
+    else
+        snprintf(zoom_str, sizeof(zoom_str), "%.0f px/yr", tracker.pixels_per_year);
+
+    Vector2 zs = MeasureTextEx(font, zoom_str, 20, 1.0f);
+    DrawTextEx(font, zoom_str,
+               (Vector2){GetScreenWidth() - zs.x - 30.0f, base_y},
+               20, 1.0f, (Color){140, 200, 255, 255});
+
+    // ── Selected event (centered, optional) ───────────────────────
+    if (selected >= 0 && selected < tracker.count) {
+        const char* name = tracker.entries[selected].name[0] ? tracker.entries[selected].name : "Untitled";
+        char txt[128];
+        snprintf(txt, sizeof(txt), "Selected: %s", name);
+        Vector2 ts = MeasureTextEx(font, txt, 19, 1.0f);
+        float cx = (GetScreenWidth() - ts.x) * 0.5f;
+        DrawTextEx(font, txt, (Vector2){cx, base_y + 1}, 19, 1.0f, (Color){180, 220, 140, 255});
+    }
+}
+
 int main(void) {
     const int W = 1500, H = 900;
 
@@ -987,7 +1083,9 @@ int main(void) {
             EndScissorMode();
 
             DrawTimelineGrid();
+            DrawCursorIndicator();
             DrawGlobalTooltip();                        // ← last = solid & on top
+            DrawStatusBar();
             DrawFPS(10, 10);
         EndDrawing();
     }
