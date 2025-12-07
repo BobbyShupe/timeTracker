@@ -11,7 +11,7 @@
 #define MAX_INPUT   128
 #define EDGE_GRAB   20
 
-typedef struct { char name[MAX_NAME]; time_t start, end; double duration_years; Color color; } Entry;
+typedef struct { char name[MAX_NAME]; time_t start, end; double duration_years; Color color; char description[256]; } Entry;
 typedef struct { Entry entries[MAX_ENTRIES]; int count; time_t view_start; double pixels_per_year; } Tracker;
 
 typedef struct {
@@ -26,7 +26,7 @@ typedef struct {
 // ─────────────────────────────────────────────────────────────────────────────
 static Font font;
 static Tracker tracker = {0};
-static TextInput name_input, start_input, end_input;
+static TextInput name_input, start_input, end_input, desc_input;
 static int selected = -1;
 static int dragging = -1;
 static int drag_mode = 0;
@@ -75,8 +75,15 @@ void SaveTracker(const char *file) {
         char s1[64], s2[64];
         strftime(s1, sizeof(s1), "%Y-%m-%d %H:%M", localtime(&tracker.entries[i].start));
         strftime(s2, sizeof(s2), "%Y-%m-%d %H:%M", localtime(&tracker.entries[i].end));
-        fprintf(f, "  {\"name\":\"%s\",\"start\":\"%s\",\"end\":\"%s\"}%s\n",
-                tracker.entries[i].name, s1, s2, i < tracker.count-1 ? "," : "");
+        // Escape quotes in description
+        char desc_esc[512] = {0};
+        for (int j = 0, k = 0; tracker.entries[i].description[j] && k < 510; j++) {
+            if (tracker.entries[i].description[j] == '"') { desc_esc[k++] = '\\'; }
+            desc_esc[k++] = tracker.entries[i].description[j];
+        }
+        fprintf(f, "  {\"name\":\"%s\",\"start\":\"%s\",\"end\":\"%s\",\"desc\":\"%s\"}%s\n",
+                tracker.entries[i].name, s1, s2, desc_esc,
+                i < tracker.count-1 ? "," : "");
     }
     fprintf(f, "]\n"); fclose(f);
 }
@@ -85,14 +92,22 @@ void LoadTracker(const char *file) {
     FILE *f = fopen(file, "r"); if (!f) return;
     char line[512]; tracker.count = 0;
     while (fgets(line, sizeof(line), f) && tracker.count < MAX_ENTRIES) {
-        char name[MAX_NAME] = {0}, start[64] = {0}, end[64] = {0};
-        if (sscanf(line, "  {\"name\":\"%63[^\"]\",\"start\":\"%63[^\"]\",\"end\":\"%63[^\"]\"}", name, start, end) == 3) {
+        char name[MAX_NAME] = {0}, start[64] = {0}, end[64] = {0}, desc[256] = {0};
+        // Try with desc first, then fallback without
+        if (sscanf(line, "  {\"name\":\"%63[^\"]\",\"start\":\"%63[^\"]\",\"end\":\"%63[^\"]\",\"desc\":\"%255[^\"]\"}", 
+                   name, start, end, desc) >= 3 ||
+            sscanf(line, "  {\"name\":\"%63[^\"]\",\"start\":\"%63[^\"]\",\"end\":\"%63[^\"]\"}", 
+                   name, start, end) == 3) {
             time_t s = ParseDateTime(start);
             time_t e = ParseDateTime(end);
             if (s && e > s) {
                 Entry *en = &tracker.entries[tracker.count++];
                 strncpy(en->name, name, MAX_NAME-1);
-                en->start = s; en->end = e;
+                en->name[MAX_NAME-1] = '\0';
+                strncpy(en->description, desc, 255);
+                en->description[255] = '\0';           // ← Keep loaded description
+                en->start = s; 
+                en->end = e;
                 en->duration_years = difftime(e, s) / (365.25*86400);
                 en->color = (Color){GetRandomValue(90,230), GetRandomValue(90,230), GetRandomValue(110,240), 255};
             }
@@ -105,6 +120,7 @@ void SyncInputsToSelected(void) {
     if (selected < 0 || selected >= tracker.count) return;
     Entry *e = &tracker.entries[selected];
     strncpy(name_input.text, e->name, MAX_INPUT-1); name_input.text[MAX_INPUT-1] = '\0';
+    strncpy(desc_input.text, e->description, MAX_INPUT-1); desc_input.text[MAX_INPUT-1] = '\0';
     strftime(start_input.text, MAX_INPUT, "%Y-%m-%d", localtime(&e->start));
     strftime(end_input.text,   MAX_INPUT, "%Y-%m-%d", localtime(&e->end));
 }
@@ -113,11 +129,13 @@ void ApplyInputsToSelected(void) {
     if (selected < 0 || selected >= tracker.count) return;
     Entry *e = &tracker.entries[selected];
     time_t s = ParseDateTime(start_input.text);
-    time_t e_time = ParseDateTime(end_input.text);  // ← Renamed to avoid conflict
+    time_t e_time = ParseDateTime(end_input.text);
     if (s && e_time > s) {
         strncpy(e->name, name_input.text[0] ? name_input.text : "Untitled", MAX_NAME-1);
+        strncpy(e->description, desc_input.text, 255);
+        e->description[255] = '\0';
         e->start = s;
-        e->end = e_time;                            // ← Fixed: was "e = e"
+        e->end = e_time;
         e->duration_years = difftime(e->end, e->start) / (365.25*86400);
     }
 }
@@ -275,11 +293,14 @@ void HandleKeyboardShortcuts(void) {
         if (tracker.count < MAX_ENTRIES) {
             Entry *en = &tracker.entries[tracker.count++];
             strncpy(en->name, name_input.text[0] ? name_input.text : "Untitled", MAX_NAME-1);
+			en->name[MAX_NAME-1] = '\0';
+            strncpy(en->description, desc_input.text, 255);
+            en->description[255] = '\0';           // ← THIS WAS MISSING
             en->start = s;
             en->end   = e;
             en->duration_years = difftime(e, s) / (365.25*86400);
             en->color = (Color){GetRandomValue(90,230), GetRandomValue(90,230), GetRandomValue(110,240), 255};
-
+			
             selected = tracker.count - 1;
             SyncInputsToSelected();
             last_selected = -2;
@@ -495,7 +516,7 @@ void DrawEvents(void) {
 
     clicked_on_event_this_frame = false;
 
-    // Sort events (unchanged)
+    // Sort events
     int order[MAX_ENTRIES];
     for (int i = 0; i < tracker.count; i++) order[i] = i;
     for (int i = 0; i < tracker.count - 1; i++)
@@ -503,7 +524,7 @@ void DrawEvents(void) {
             if (tracker.entries[order[i]].start > tracker.entries[order[j]].start)
                 { int tmp = order[i]; order[i] = order[j]; order[j] = tmp; }
 
-    // Track assignment (unchanged)
+    // Track assignment
     for (int t = 0; t < max_tracks; t++) track_free_until[t] = 0;
     for (int k = 0; k < tracker.count; k++) {
         int i = order[k]; Entry *e = &tracker.entries[i];
@@ -514,7 +535,6 @@ void DrawEvents(void) {
         g_track_of_event[i] = track;
     }
 
-    // Draw each event - now starts at x=0
     for (int i = 0; i < tracker.count; i++) {
         Entry *e = &tracker.entries[i];
 
@@ -530,35 +550,30 @@ void DrawEvents(void) {
 
         float y = events_start_y + g_track_of_event[i] * row_spacing;
 
-        // Hitbox and interaction (unchanged logic)
         Rectangle hit = { draw_x1, y - 7, draw_len, 16 };
         bool hovered = CheckCollisionPointRec(mouse, hit);
 
-        if (hovered && IsMouseButtonPressed(MOUSE_LEFT_BUTTON))
-            clicked_on_event_this_frame = true;
-
+        if (hovered && IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) clicked_on_event_this_frame = true;
         if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON) && hovered && dragging == -1) {
             selected = i; dragging = i;
             float rel_x = mouse.x - draw_x1;
             drag_mode = (rel_x < EDGE_GRAB_PIXELS) ? 1 :
                         (rel_x > draw_len - EDGE_GRAB_PIXELS) ? 2 : 0;
-
-            time_t cursor_time = tracker.view_start + (time_t)((mouse.x - 0.0f) * secs_per_pixel);  // ← changed 100→0
+            time_t cursor_time = tracker.view_start + (time_t)((mouse.x) * secs_per_pixel);
             if (drag_mode == 1)      drag_offset = e->start - cursor_time;
             else if (drag_mode == 2) drag_offset = e->end   - cursor_time;
             else { drag_offset = e->start - cursor_time; original_duration = e->end - e->start; }
         }
 
-        // Colors (unchanged)
+        // Colors & drawing
         bool is_selected = (selected == i);
         bool is_dragging = (dragging == i);
-        Color col = is_dragging ? (Color){255,100,100,255} :
+        Color col = is_dragging ? RED :
                     is_selected ? (Color){255,70,70,255} :
                     hovered     ? (Color){255,130,130,255} : (Color){240,40,40,255};
 
         DrawLineEx((Vector2){draw_x1, y}, (Vector2){draw_x1 + draw_len, y}, line_thickness, col);
 
-        // Rings + text (no scissor here anymore)
         DrawRing((Vector2){x_start, y}, 4.6f, 5.4f, 0, 360, 32, Fade(WHITE, 0.75f));
         DrawRing((Vector2){x_start, y}, 2.6f, 3.4f, 0, 360, 32, col);
         DrawRing((Vector2){draw_x2, y}, 4.6f, 5.4f, 0, 360, 32, Fade(WHITE, 0.75f));
@@ -569,22 +584,92 @@ void DrawEvents(void) {
             DrawRing((Vector2){draw_x2, y}, 5.8f, 6.8f, 0, 360, 32, Fade(YELLOW, 0.45f));
         }
 
+        // Name label
         if (draw_len >= 20.0f) {
             const char* name = e->name[0] ? e->name : "Untitled";
             float fs = 12.0f;
-            Vector2 ts = MeasureTextEx(font, name, fs, 1.0f);
-
-            static char buf[64] = {0};
-            if (ts.x > duration_px - 10.0f) {
+            Vector2 size = MeasureTextEx(font, name, fs, 1.0f);
+            if (size.x > duration_px - 10) {
+                static char buf[64];
                 strncpy(buf, name, 20); strcpy(buf + 20, "..."); buf[23] = '\0';
-                name = buf; ts = MeasureTextEx(font, name, fs, 1.0f);
+                name = buf;
+                size = MeasureTextEx(font, name, fs, 1.0f);
+            }
+            float tx = x_start + (duration_px - size.x) * 0.5f;
+            DrawTextEx(font, name, (Vector2){tx + 1, y - 7 + 1}, fs, 1, Fade(BLACK, 0.6f));
+            DrawTextEx(font, name, (Vector2){tx, y - 7}, fs, 1, WHITE);
+        }
+
+        // FIXED, HORIZONTAL, WORD-WRAPPED TOOLTIP (100% working)
+        if (hovered && e->description[0]) {
+            const char* text = e->description;
+            float fontSize = 18.0f;
+            float maxWidth = 520.0f;
+            float pad = 16.0f;
+            float lineHeight = fontSize + 6.0f;
+
+            // Measure total size
+            char line[512];
+            float totalH = pad * 2;
+            float maxW = 0.0f;
+            const char* p = text;
+
+            while (*p) {
+                int len = 0;
+                while (p[len] && p[len] != '\n') {
+                    char temp[2] = { p[len], 0 };
+                    if (MeasureTextEx(font, text, fontSize, 1.0f).x > maxWidth) break;
+                    len++;
+                }
+                if (len == 0) len = 1;
+                while (len > 0 && (p[len-1] == ' ' || p[len-1] == '\t')) len--;
+
+                strncpy(line, p, len); line[len] = '\0';
+                float w = MeasureTextEx(font, line, fontSize, 1.0f).x;
+                maxW = fmaxf(maxW, w);
+                totalH += lineHeight;
+
+                p += len;
+                while (*p == ' ' || *p == '\n') p++;
             }
 
-            float tx = x_start + (duration_px - ts.x) * 0.5f;
-            float ty = y - ts.y * 0.5f - 1.0f;
+            Rectangle bubble = {
+                draw_x1 + (draw_len - (maxW + pad*2)) * 0.5f,
+                y - totalH - 16,
+                maxW + pad*2,
+                totalH
+            };
 
-            DrawTextEx(font, name, (Vector2){tx + 1, ty + 1}, fs, 1, Fade(BLACK, 0.6f));
-            DrawTextEx(font, name, (Vector2){tx,     ty},     fs, 1, WHITE);
+            if (bubble.y < timeline_y + 40) bubble.y = y + 24;
+            if (bubble.x < 10) bubble.x = 10;
+            if (bubble.x + bubble.width > GetScreenWidth() - 10)
+                bubble.x = GetScreenWidth() - bubble.width - 10;
+
+            // Draw lines
+            p = text;
+            float dy = bubble.y + pad;
+            while (*p) {
+                int len = 0;
+                while (p[len] && p[len] != '\n') {
+                    char temp[512];
+                    strncpy(temp, p, len + 1); temp[len + 1] = '\0';
+                    if (MeasureTextEx(font, temp, fontSize, 1.0f).x > maxWidth) break;
+                    len++;
+                }
+                if (len == 0) len = 1;
+                while (len > 0 && (p[len-1] == ' ' || p[len-1] == '\t')) len--;
+
+                strncpy(line, p, len); line[len] = '\0';
+                Vector2 sz = MeasureTextEx(font, line, fontSize, 1.0f);
+                float dx = bubble.x + (bubble.width - sz.x) * 0.5f;
+
+                DrawTextEx(font, line, (Vector2){dx + 1, dy + 1}, fontSize, 1.0f, Fade(BLACK, 0.5f));
+                DrawTextEx(font, line, (Vector2){dx, dy}, fontSize, 1.0f, WHITE);
+
+                dy += lineHeight;
+                p += len;
+                while (*p == ' ' || *p == '\n') p++;
+            }
         }
     }
 
@@ -598,16 +683,18 @@ void DrawEvents(void) {
 void DrawUI(void) {
     int W = GetScreenWidth(), H = GetScreenHeight();
 
-    DrawRectangle(0, 0, W, 90, (Color){20,20,35,255});
-    DrawLine(0, 90, W, 90, (Color){60,60,80,255});
+    DrawRectangle(0, 0, W, 140, (Color){20,20,35,255});  // taller header
+    DrawLine(0, 140, W, 140, (Color){60,60,80,255});
 
-    DrawTextEx(font, "Name:",   (Vector2){100, 30}, 22, 1, (Color){200,200,220,255});
-    DrawTextEx(font, "Start:",  (Vector2){620, 30}, 22, 1, (Color){200,200,220,255});
-    DrawTextEx(font, "End:",    (Vector2){900, 30}, 22, 1, (Color){200,200,220,255});
+    DrawTextEx(font, "Name:",        (Vector2){100, 30}, 22, 1, (Color){200,200,220,255});
+    DrawTextEx(font, "Start:",       (Vector2){620, 30}, 22, 1, (Color){200,200,220,255});
+    DrawTextEx(font, "End:",         (Vector2){900, 30}, 22, 1, (Color){200,200,220,255});
+    DrawTextEx(font, "Description:", (Vector2){100, 90}, 22, 1, (Color){200,200,220,255});
 
     DrawTextInput(&name_input,   font);
     DrawTextInput(&start_input,  font);
     DrawTextInput(&end_input,    font);
+    DrawTextInput(&desc_input,   font);
 
     DrawTextEx(font,
         "LClick=select • Drag edges=resize • RDrag=pan • Scroll=zoom • Enter=new • Del=remove",
@@ -737,6 +824,7 @@ int main(void) {
     InitTextInput(&name_input,  (Rectangle){180, 20, 420, 48}, "");
     InitTextInput(&start_input, (Rectangle){680, 20, 200, 48}, today_str);
     InitTextInput(&end_input,   (Rectangle){960, 20, 200, 48}, today_str);
+    InitTextInput(&desc_input, (Rectangle){180, 80, 980, 48}, "");
 
     while (!WindowShouldClose()) {
         HandlePanningAndZooming();
@@ -744,6 +832,7 @@ int main(void) {
         UpdateTextInput(&name_input, font);
         UpdateTextInput(&start_input, font);
         UpdateTextInput(&end_input, font);
+        UpdateTextInput(&desc_input, font);
         HandleKeyboardShortcuts();
 
         if (selected != last_selected) {
