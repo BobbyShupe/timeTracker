@@ -8,10 +8,10 @@
 
 #define MAX_ENTRIES 1000
 #define MAX_NAME    64
-#define MAX_INPUT   128
+#define MAX_INPUT   1024
 #define EDGE_GRAB   20
 
-typedef struct { char name[MAX_NAME]; time_t start, end; double duration_years; Color color; char description[256]; } Entry;
+typedef struct { char name[MAX_NAME]; time_t start, end; double duration_years; Color color; char description[512]; } Entry;
 typedef struct { Entry entries[MAX_ENTRIES]; int count; time_t view_start; double pixels_per_year; } Tracker;
 
 typedef struct {
@@ -35,17 +35,15 @@ static int last_selected = -1;
 
 static const float timeline_y = 140.0f;
 static const float events_start_y = timeline_y + 160.0f;   // ← YOUR desired offset
-static const float row_height     = 18.0f;
-static const float bar_height     = 14.0f;
 
 static time_t original_duration = 0;
 static int    g_track_of_event[1024] = {0};
 static double secs_per_pixel = 0.0;
 static time_t track_free_until[50];
 static bool clicked_on_event_this_frame = false;
-static bool dual_zoom_active = false;  // add this line
-
-static const float LEFT_MARGIN = 20.0f;
+static bool  g_show_tooltip = false;
+static char  g_tooltip_text[512];
+static float g_tooltip_x, g_tooltip_y;
 
 #define EDGE_GRAB_PIXELS 16.0f   // use this instead of EDGE_GRAB to avoid conflict
 // ─────────────────────────────────────────────────────────────────────────────
@@ -76,8 +74,8 @@ void SaveTracker(const char *file) {
         strftime(s1, sizeof(s1), "%Y-%m-%d %H:%M", localtime(&tracker.entries[i].start));
         strftime(s2, sizeof(s2), "%Y-%m-%d %H:%M", localtime(&tracker.entries[i].end));
         // Escape quotes in description
-        char desc_esc[512] = {0};
-        for (int j = 0, k = 0; tracker.entries[i].description[j] && k < 510; j++) {
+        char desc_esc[1024] = {0};
+        for (int j = 0, k = 0; tracker.entries[i].description[j] && k < 1024; j++) {
             if (tracker.entries[i].description[j] == '"') { desc_esc[k++] = '\\'; }
             desc_esc[k++] = tracker.entries[i].description[j];
         }
@@ -92,9 +90,9 @@ void LoadTracker(const char *file) {
     FILE *f = fopen(file, "r"); if (!f) return;
     char line[512]; tracker.count = 0;
     while (fgets(line, sizeof(line), f) && tracker.count < MAX_ENTRIES) {
-        char name[MAX_NAME] = {0}, start[64] = {0}, end[64] = {0}, desc[256] = {0};
+        char name[MAX_NAME] = {0}, start[64] = {0}, end[64] = {0}, desc[512] = {0};
         // Try with desc first, then fallback without
-        if (sscanf(line, "  {\"name\":\"%63[^\"]\",\"start\":\"%63[^\"]\",\"end\":\"%63[^\"]\",\"desc\":\"%255[^\"]\"}", 
+        if (sscanf(line, "  {\"name\":\"%63[^\"]\",\"start\":\"%63[^\"]\",\"end\":\"%63[^\"]\",\"desc\":\"%511[^\"]\"}", 
                    name, start, end, desc) >= 3 ||
             sscanf(line, "  {\"name\":\"%63[^\"]\",\"start\":\"%63[^\"]\",\"end\":\"%63[^\"]\"}", 
                    name, start, end) == 3) {
@@ -104,8 +102,8 @@ void LoadTracker(const char *file) {
                 Entry *en = &tracker.entries[tracker.count++];
                 strncpy(en->name, name, MAX_NAME-1);
                 en->name[MAX_NAME-1] = '\0';
-                strncpy(en->description, desc, 255);
-                en->description[255] = '\0';           // ← Keep loaded description
+                strncpy(en->description, desc, 511);
+                en->description[511] = '\0';           // ← Keep loaded description
                 en->start = s; 
                 en->end = e;
                 en->duration_years = difftime(e, s) / (365.25*86400);
@@ -132,8 +130,8 @@ void ApplyInputsToSelected(void) {
     time_t e_time = ParseDateTime(end_input.text);
     if (s && e_time > s) {
         strncpy(e->name, name_input.text[0] ? name_input.text : "Untitled", MAX_NAME-1);
-        strncpy(e->description, desc_input.text, 255);
-        e->description[255] = '\0';
+        strncpy(e->description, desc_input.text, 511);
+        e->description[511] = '\0';
         e->start = s;
         e->end = e_time;
         e->duration_years = difftime(e->end, e->start) / (365.25*86400);
@@ -293,14 +291,14 @@ void HandleKeyboardShortcuts(void) {
         if (tracker.count < MAX_ENTRIES) {
             Entry *en = &tracker.entries[tracker.count++];
             strncpy(en->name, name_input.text[0] ? name_input.text : "Untitled", MAX_NAME-1);
-			en->name[MAX_NAME-1] = '\0';
-            strncpy(en->description, desc_input.text, 255);
-            en->description[255] = '\0';           // ← THIS WAS MISSING
+            en->name[MAX_NAME-1] = '\0';
+            strncpy(en->description, desc_input.text, 511);
+            en->description[511] = '\0';           // ← Fixed: now 511 (was 255)
             en->start = s;
             en->end   = e;
             en->duration_years = difftime(e, s) / (365.25*86400);
             en->color = (Color){GetRandomValue(90,230), GetRandomValue(90,230), GetRandomValue(110,240), 255};
-			
+            
             selected = tracker.count - 1;
             SyncInputsToSelected();
             last_selected = -2;
@@ -310,7 +308,9 @@ void HandleKeyboardShortcuts(void) {
     if (IsKeyPressed(KEY_DELETE) && selected >= 0) {
         memmove(&tracker.entries[selected], &tracker.entries[selected+1],
                 sizeof(Entry) * (tracker.count - selected - 1));
-        tracker.count--; selected = -1; last_selected = -2;
+        tracker.count--; 
+        selected = -1; 
+        last_selected = -2;
     }
 }
 
@@ -515,8 +515,9 @@ void DrawEvents(void) {
     secs_per_pixel = (365.25 * 86400.0) / tracker.pixels_per_year;
 
     clicked_on_event_this_frame = false;
+    g_show_tooltip = false;  // ← important: reset every frame
 
-    // Sort events
+    // Sort events by start time
     int order[MAX_ENTRIES];
     for (int i = 0; i < tracker.count; i++) order[i] = i;
     for (int i = 0; i < tracker.count - 1; i++)
@@ -524,7 +525,7 @@ void DrawEvents(void) {
             if (tracker.entries[order[i]].start > tracker.entries[order[j]].start)
                 { int tmp = order[i]; order[i] = order[j]; order[j] = tmp; }
 
-    // Track assignment
+    // Track assignment (vertical stacking)
     for (int t = 0; t < max_tracks; t++) track_free_until[t] = 0;
     for (int k = 0; k < tracker.count; k++) {
         int i = order[k]; Entry *e = &tracker.entries[i];
@@ -593,83 +594,19 @@ void DrawEvents(void) {
                 static char buf[64];
                 strncpy(buf, name, 20); strcpy(buf + 20, "..."); buf[23] = '\0';
                 name = buf;
-                size = MeasureTextEx(font, name, fs, 1.0f);
             }
             float tx = x_start + (duration_px - size.x) * 0.5f;
             DrawTextEx(font, name, (Vector2){tx + 1, y - 7 + 1}, fs, 1, Fade(BLACK, 0.6f));
             DrawTextEx(font, name, (Vector2){tx, y - 7}, fs, 1, WHITE);
         }
 
-        // FIXED, HORIZONTAL, WORD-WRAPPED TOOLTIP (100% working)
+        // ───── TOOLTIP: ONLY STORE DATA HERE (drawn later by DrawGlobalTooltip) ─────
         if (hovered && e->description[0]) {
-            const char* text = e->description;
-            float fontSize = 18.0f;
-            float maxWidth = 520.0f;
-            float pad = 16.0f;
-            float lineHeight = fontSize + 6.0f;
-
-            // Measure total size
-            char line[512];
-            float totalH = pad * 2;
-            float maxW = 0.0f;
-            const char* p = text;
-
-            while (*p) {
-                int len = 0;
-                while (p[len] && p[len] != '\n') {
-                    char temp[2] = { p[len], 0 };
-                    if (MeasureTextEx(font, text, fontSize, 1.0f).x > maxWidth) break;
-                    len++;
-                }
-                if (len == 0) len = 1;
-                while (len > 0 && (p[len-1] == ' ' || p[len-1] == '\t')) len--;
-
-                strncpy(line, p, len); line[len] = '\0';
-                float w = MeasureTextEx(font, line, fontSize, 1.0f).x;
-                maxW = fmaxf(maxW, w);
-                totalH += lineHeight;
-
-                p += len;
-                while (*p == ' ' || *p == '\n') p++;
-            }
-
-            Rectangle bubble = {
-                draw_x1 + (draw_len - (maxW + pad*2)) * 0.5f,
-                y - totalH - 16,
-                maxW + pad*2,
-                totalH
-            };
-
-            if (bubble.y < timeline_y + 40) bubble.y = y + 24;
-            if (bubble.x < 10) bubble.x = 10;
-            if (bubble.x + bubble.width > GetScreenWidth() - 10)
-                bubble.x = GetScreenWidth() - bubble.width - 10;
-
-            // Draw lines
-            p = text;
-            float dy = bubble.y + pad;
-            while (*p) {
-                int len = 0;
-                while (p[len] && p[len] != '\n') {
-                    char temp[512];
-                    strncpy(temp, p, len + 1); temp[len + 1] = '\0';
-                    if (MeasureTextEx(font, temp, fontSize, 1.0f).x > maxWidth) break;
-                    len++;
-                }
-                if (len == 0) len = 1;
-                while (len > 0 && (p[len-1] == ' ' || p[len-1] == '\t')) len--;
-
-                strncpy(line, p, len); line[len] = '\0';
-                Vector2 sz = MeasureTextEx(font, line, fontSize, 1.0f);
-                float dx = bubble.x + (bubble.width - sz.x) * 0.5f;
-
-                DrawTextEx(font, line, (Vector2){dx + 1, dy + 1}, fontSize, 1.0f, Fade(BLACK, 0.5f));
-                DrawTextEx(font, line, (Vector2){dx, dy}, fontSize, 1.0f, WHITE);
-
-                dy += lineHeight;
-                p += len;
-                while (*p == ' ' || *p == '\n') p++;
-            }
+            strncpy(g_tooltip_text, e->description, 511);
+            g_tooltip_text[511] = '\0';
+            g_tooltip_x = mouse.x;
+            g_tooltip_y = mouse.y;
+            g_show_tooltip = true;
         }
     }
 
@@ -678,6 +615,109 @@ void DrawEvents(void) {
         dragging = -1;
         SyncInputsToSelected();
     }
+}
+
+void DrawGlobalTooltip(void)
+{
+    if (!g_show_tooltip) return;
+
+    const float fontSize = 19.0f;
+    const float spacing  = 1.2f;
+    const float maxWidth = 640.0f;
+    const float pad      = 24.0f;
+    const float lineH    = fontSize + 10.0f;
+
+    // ── Measure total height ──
+    float totalH = pad * 2.0f;
+    float lineW  = 0.0f;
+    const char* p = g_tooltip_text;
+
+    while (*p) {
+        if (*p == '\n') {
+            totalH += lineH;
+            lineW = 0.0f;
+            p++;
+            continue;
+        }
+
+        const char* start = p;
+        while (*p && *p != ' ' && *p != '\n') p++;
+        int len = (int)(p - start);
+        if (len == 0) { p++; continue; }
+
+        float wordW = MeasureTextEx(font, TextFormat("%.*s", len, start), fontSize, spacing).x;
+        float spaceW = (lineW > 0.0f) ? MeasureTextEx(font, " ", fontSize, spacing).x : 0.0f;
+
+        if (lineW + spaceW + wordW > maxWidth - pad*2 && lineW > 0.0f) {
+            totalH += lineH;
+            lineW = 0.0f;
+        }
+        lineW += spaceW + wordW;
+
+        if (*p == ' ') p++;
+    }
+    if (lineW > 0.0f) totalH += lineH;
+
+    // ── Position tooltip ──
+    float x = g_tooltip_x + 30.0f;
+    float y = g_tooltip_y - totalH - 20.0f;
+    if (y < 160.0f) y = g_tooltip_y + 40.0f;
+
+    float w = maxWidth + pad * 2.0f;
+    if (x + w > GetScreenWidth() - 20.0f) x = GetScreenWidth() - w - 20.0f;
+    if (x < 20.0f) x = 20.0f;
+
+    Rectangle rect = { x, y, w, totalH };
+
+    // ── SOLID background (drawn last = always on top) ──
+    DrawRectangleRounded(rect, 0.3f, 16, (Color){8, 10, 22, 255});           // 100% opaque
+    Rectangle inner = { x + 6, y + 6, w - 12, totalH - 12 };
+    DrawRectangleRounded(inner, 0.25f, 14, (Color){16, 20, 38, 255});
+    DrawRectangleRoundedLinesEx(rect, 0.3f, 16, 4.0f, (Color){100, 200, 255, 255});
+
+    // ── Draw wrapped text ──
+    float cx = x + pad;
+    float cy = y + pad;
+    p = g_tooltip_text;
+    lineW = 0.0f;
+
+    while (*p) {
+        if (*p == '\n') {
+            cy += lineH;
+            cx = x + pad;
+            lineW = 0.0f;
+            p++;
+            continue;
+        }
+
+        const char* start = p;
+        while (*p && *p != ' ' && *p != '\n') p++;
+        int len = (int)(p - start);
+        if (len == 0) { p++; continue; }
+
+        char word[512];
+        snprintf(word, sizeof(word), "%.*s", len, start);
+
+        float wordW = MeasureTextEx(font, word, fontSize, spacing).x;
+        float spaceW = (lineW > 0.0f) ? MeasureTextEx(font, " ", fontSize, spacing).x : 0.0f;
+
+        if (lineW + spaceW + wordW > w - pad*2 && lineW > 0.0f) {
+            cy += lineH;
+            cx = x + pad;
+            lineW = 0.0f;
+        }
+
+        DrawTextEx(font, word, (Vector2){cx + 1, cy + 1}, fontSize, spacing, Fade(BLACK, 0.8f));
+        DrawTextEx(font, word, (Vector2){cx,     cy},     fontSize, spacing, WHITE);
+
+        cx += wordW + spaceW;
+        lineW += wordW + spaceW;
+
+        if (*p == ' ') p++;
+    }
+
+    // Reset for next frame
+    g_show_tooltip = false;
 }
 
 void DrawUI(void) {
@@ -727,61 +767,118 @@ void DrawTextInput(TextInput *ti, Font font) {
 
 void UpdateTextInput(TextInput *ti, Font font) {
     Vector2 mouse = GetMousePosition();
+
+    // ───── Click to focus + cursor placement ─────
     if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
         bool was_active = ti->active;
         ti->active = CheckCollisionPointRec(mouse, ti->rect);
+
         if (ti->active && !was_active) {
             float rel_x = mouse.x - (ti->rect.x + 12);
-            if (rel_x < 0) ti->cursor_pos = 0;
-            else {
+            if (rel_x < 0) {
+                ti->cursor_pos = 0;
+            } else {
                 int low = 0, high = (int)strlen(ti->text);
                 while (low < high) {
                     int mid = (low + high + 1) / 2;
-                    if (TextWidthUpTo(font, ti->text, mid, 20, 1) <= rel_x) low = mid;
-                    else high = mid - 1;
+                    if (TextWidthUpTo(font, ti->text, mid, 20, 1) <= rel_x)
+                        low = mid;
+                    else
+                        high = mid - 1;
                 }
                 ti->cursor_pos = low;
             }
         }
     }
+
     if (!ti->active) return;
 
+    // ───── Character input (same as before) ─────
     int key = GetCharPressed();
     while (key > 0) {
         if (key >= 32 && key <= 125 && strlen(ti->text) < MAX_INPUT-2) {
-            memmove(ti->text + ti->cursor_pos + 1, ti->text + ti->cursor_pos, strlen(ti->text + ti->cursor_pos) + 1);
+            memmove(ti->text + ti->cursor_pos + 1,
+                    ti->text + ti->cursor_pos,
+                    strlen(ti->text + ti->cursor_pos) + 1);
             ti->text[ti->cursor_pos++] = (char)key;
         }
         key = GetCharPressed();
     }
-    if (IsKeyPressed(KEY_BACKSPACE) && ti->cursor_pos > 0) { memmove(ti->text + ti->cursor_pos - 1, ti->text + ti->cursor_pos, strlen(ti->text + ti->cursor_pos) + 1); ti->cursor_pos--; }
-    if (IsKeyPressed(KEY_DELETE) && ti->cursor_pos < (int)strlen(ti->text)) { memmove(ti->text + ti->cursor_pos, ti->text + ti->cursor_pos + 1, strlen(ti->text + ti->cursor_pos + 1) + 1); }
-    // ───── PASTE SUPPORT (Ctrl+V) ─────
-    if (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL))
-    {
-        if (IsKeyPressed(KEY_V))
-        {
-            const char *clipboard = GetClipboardText();
-            if (clipboard)
-            {
-                int len = (int)strlen(clipboard);
-                int space_left = MAX_INPUT - 1 - strlen(ti->text);
-                if (space_left > 0)
-                {
-                    if (len > space_left) len = space_left;
-                    memmove(ti->text + ti->cursor_pos + len, ti->text + ti->cursor_pos,
+
+    // ───── KEY REPEAT SYSTEM (Backspace & Delete) ─────
+    static float repeatTimer = 0.0f;
+    static int   repeatKey   = 0;
+
+    const float REPEAT_DELAY    = 0.45f;  // seconds before repeat starts
+    const float REPEAT_INTERVAL = 0.04f;  // how fast it repeats after delay
+
+    int currentKey = 0;
+    if (IsKeyDown(KEY_BACKSPACE)) currentKey = KEY_BACKSPACE;
+    else if (IsKeyDown(KEY_DELETE))   currentKey = KEY_DELETE;
+
+    if (currentKey != 0) {
+        if (currentKey != repeatKey) {
+            // Key just pressed — delete one char immediately
+            if (currentKey == KEY_BACKSPACE && ti->cursor_pos > 0) {
+                memmove(ti->text + ti->cursor_pos - 1,
+                        ti->text + ti->cursor_pos,
+                        strlen(ti->text + ti->cursor_pos) + 1);
+                ti->cursor_pos--;
+            }
+            else if (currentKey == KEY_DELETE && ti->cursor_pos < (int)strlen(ti->text)) {
+                memmove(ti->text + ti->cursor_pos,
+                        ti->text + ti->cursor_pos + 1,
+                        strlen(ti->text + ti->cursor_pos + 1) + 1);
+            }
+            repeatKey = currentKey;
+            repeatTimer = REPEAT_DELAY;  // wait before repeating
+        } else {
+            // Key is held — handle repeat timing
+            repeatTimer -= GetFrameTime();
+            if (repeatTimer <= 0.0f) {
+                if (currentKey == KEY_BACKSPACE && ti->cursor_pos > 0) {
+                    memmove(ti->text + ti->cursor_pos - 1,
+                            ti->text + ti->cursor_pos,
                             strlen(ti->text + ti->cursor_pos) + 1);
-                    memcpy(ti->text + ti->cursor_pos, clipboard, len);
-                    ti->cursor_pos += len;
-                    ti->text[MAX_INPUT-1] = '\0';
+                    ti->cursor_pos--;
                 }
+                else if (currentKey == KEY_DELETE && ti->cursor_pos < (int)strlen(ti->text)) {
+                    memmove(ti->text + ti->cursor_pos,
+                            ti->text + ti->cursor_pos + 1,
+                            strlen(ti->text + ti->cursor_pos + 1) + 1);
+                }
+                repeatTimer = REPEAT_INTERVAL;  // next repeat soon
+            }
+        }
+    } else {
+        // No repeat key held
+        repeatKey = 0;
+        repeatTimer = 0.0f;
+    }
+
+    // ───── Cursor movement keys (also repeat ─────
+    if (IsKeyPressedRepeat(KEY_LEFT) && ti->cursor_pos > 0) ti->cursor_pos--;
+    if (IsKeyPressedRepeat(KEY_RIGHT) && ti->cursor_pos < (int)strlen(ti->text)) ti->cursor_pos++;
+    if (IsKeyPressed(KEY_HOME)) ti->cursor_pos = 0;
+    if (IsKeyPressed(KEY_END)) ti->cursor_pos = (int)strlen(ti->text);
+
+    // ───── Ctrl+V Paste (unchanged) ─────
+    if ((IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) && IsKeyPressed(KEY_V)) {
+        const char *clipboard = GetClipboardText();
+        if (clipboard) {
+            size_t len = strlen(clipboard);
+            size_t space = MAX_INPUT - 1 - strlen(ti->text);
+            if (space > 0) {
+                if (len > space) len = space;
+                memmove(ti->text + ti->cursor_pos + len,
+                        ti->text + ti->cursor_pos,
+                        strlen(ti->text + ti->cursor_pos) + 1);
+                memcpy(ti->text + ti->cursor_pos, clipboard, len);
+                ti->cursor_pos += (int)len;
+                ti->text[MAX_INPUT-1] = '\0';
             }
         }
     }
-    if (IsKeyPressed(KEY_LEFT) && ti->cursor_pos > 0) ti->cursor_pos--;
-    if (IsKeyPressed(KEY_RIGHT) && ti->cursor_pos < (int)strlen(ti->text)) ti->cursor_pos++;
-    if (IsKeyPressed(KEY_HOME)) ti->cursor_pos = 0;
-    if (IsKeyPressed(KEY_END)) ti->cursor_pos = strlen(ti->text);
 }
 
 int main(void) {
@@ -864,6 +961,7 @@ BeginDrawing();
     EndScissorMode();
 DrawTimelineGrid();
     // 3. FPS stays last (always visible)
+DrawGlobalTooltip();
     DrawFPS(10, 10);
 EndDrawing();
     }
