@@ -1080,7 +1080,15 @@ int main(void) {
                 strcpy(last_end,   end_input.text);
             }
         }
-
+    if (IsKeyPressed(KEY_F11)) {
+        if (IsWindowFullscreen()) {
+            ClearWindowState(FLAG_FULLSCREEN_MODE);
+            SetWindowSize(1500, 900);           // your preferred windowed size
+            SetWindowPosition(100, 100);
+        } else {
+            SetWindowState(FLAG_FULLSCREEN_MODE);
+        }
+    }
         // ────────────────────── DRAWING ──────────────────────
         BeginDrawing();
             ClearBackground((Color){12, 12, 28, 255});
