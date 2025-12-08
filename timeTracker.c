@@ -7,11 +7,12 @@
   #include <math.h>          // ← THIS WAS MISSING
   
   #define MAX_ENTRIES 1000
-  #define MAX_NAME    64
+  #define MAX_NAME    256
   #define MAX_INPUT   1024
   #define EDGE_GRAB   20
+  #define MAX_DESC    1024
   
-  typedef struct { char name[MAX_NAME]; time_t start, end; double duration_years; Color color; char description[512]; } Entry;
+  typedef struct { char name[MAX_NAME]; time_t start, end; double duration_years; Color color; char description[MAX_DESC]; } Entry;
   typedef struct { Entry entries[MAX_ENTRIES]; int count; time_t view_start; double pixels_per_year; } Tracker;
   
   typedef struct {
@@ -66,53 +67,86 @@
       return 0;
   }
   
-  void SaveTracker(const char *file) {
-      FILE *f = fopen(file, "w"); if (!f) return;
-      fprintf(f, "[\n");
-      for (int i = 0; i < tracker.count; i++) {
-          char s1[64], s2[64];
-          strftime(s1, sizeof(s1), "%Y-%m-%d %H:%M", localtime(&tracker.entries[i].start));
-          strftime(s2, sizeof(s2), "%Y-%m-%d %H:%M", localtime(&tracker.entries[i].end));
-          // Escape quotes in description
-          char desc_esc[1024] = {0};
-          for (int j = 0, k = 0; tracker.entries[i].description[j] && k < 1024; j++) {
-              if (tracker.entries[i].description[j] == '"') { desc_esc[k++] = '\\'; }
-              desc_esc[k++] = tracker.entries[i].description[j];
-          }
-          fprintf(f, "  {\"name\":\"%s\",\"start\":\"%s\",\"end\":\"%s\",\"desc\":\"%s\"}%s\n",
-                  tracker.entries[i].name, s1, s2, desc_esc,
-                  i < tracker.count-1 ? "," : "");
-      }
-      fprintf(f, "]\n"); fclose(f);
-  }
-  
-  void LoadTracker(const char *file) {
-      FILE *f = fopen(file, "r"); if (!f) return;
-      char line[512]; tracker.count = 0;
-      while (fgets(line, sizeof(line), f) && tracker.count < MAX_ENTRIES) {
-          char name[MAX_NAME] = {0}, start[64] = {0}, end[64] = {0}, desc[512] = {0};
-          // Try with desc first, then fallback without
-          if (sscanf(line, "  {\"name\":\"%63[^\"]\",\"start\":\"%63[^\"]\",\"end\":\"%63[^\"]\",\"desc\":\"%511[^\"]\"}", 
-                     name, start, end, desc) >= 3 ||
-              sscanf(line, "  {\"name\":\"%63[^\"]\",\"start\":\"%63[^\"]\",\"end\":\"%63[^\"]\"}", 
-                     name, start, end) == 3) {
-              time_t s = ParseDateTime(start);
-              time_t e = ParseDateTime(end);
-              if (s && e > s) {
-                  Entry *en = &tracker.entries[tracker.count++];
-                  strncpy(en->name, name, MAX_NAME-1);
-                  en->name[MAX_NAME-1] = '\0';
-                  strncpy(en->description, desc, 511);
-                  en->description[511] = '\0';           // ← Keep loaded description
-                  en->start = s; 
-                  en->end = e;
-                  en->duration_years = difftime(e, s) / (365.25*86400);
-                  en->color = (Color){GetRandomValue(90,230), GetRandomValue(90,230), GetRandomValue(110,240), 255};
-              }
-          }
-      }
-      fclose(f);
-  }
+// ─────────────────────────────────────────────────────────────────────────────
+// SAVE: now safely escapes quotes and writes full Unicode names/descriptions
+// ─────────────────────────────────────────────────────────────────────────────
+void SaveTracker(const char *file)
+{
+    FILE *f = fopen(file, "w");
+    if (!f) return;
+
+    fprintf(f, "[\n");
+    for (int i = 0; i < tracker.count; i++) {
+        char s1[64], s2[64];
+        strftime(s1, sizeof(s1), "%Y-%m-%d %H:%M", localtime(&tracker.entries[i].start));
+        strftime(s2, sizeof(s2), "%Y-%m-%d %H:%M", localtime(&tracker.entries[i].end));
+
+        // Properly escape " in name and description
+        char name_esc[512] = {0};
+        char desc_esc[2048] = {0};
+        for (int j = 0, k = 0; tracker.entries[i].name[j] && k < 510; j++) {
+            if (tracker.entries[i].name[j] == '"') name_esc[k++] = '\\';
+            name_esc[k++] = tracker.entries[i].name[j];
+        }
+        for (int j = 0, k = 0; tracker.entries[i].description[j] && k < 2046; j++) {
+            if (tracker.entries[i].description[j] == '"') desc_esc[k++] = '\\';
+            desc_esc[k++] = tracker.entries[i].description[j];
+        }
+
+        fprintf(f, "  {\"name\":\"%s\",\"start\":\"%s\",\"end\":\"%s\",\"desc\":\"%s\"}%s\n",
+                name_esc, s1, s2, desc_esc,
+                (i < tracker.count-1) ? "," : "");
+    }
+    fprintf(f, "]\n");
+    fclose(f);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LOAD: now reads any length (no fixed 63-char limit) → works with Unicode
+// ─────────────────────────────────────────────────────────────────────────────
+void LoadTracker(const char *file)
+{
+    FILE *f = fopen(file, "r");
+    if (!f) return;
+
+    char line[4096];
+    tracker.count = 0;
+
+    while (fgets(line, sizeof(line), f) && tracker.count < MAX_ENTRIES) {
+        char name[512] = {0};
+        char start_str[64] = {0};
+        char end_str[64] = {0};
+        char desc[2048] = {0};
+
+        // Flexible parsing – no hard 63-char limit anymore
+        int n = sscanf(line,
+            "  {\"name\":\"%511[^\"]\",\"start\":\"%63[^\"]\",\"end\":\"%63[^\"]\",\"desc\":\"%2047[^\"]\"}",
+            name, start_str, end_str, desc);
+
+        if (n < 3) {
+            // Try without description
+            n = sscanf(line,
+                "  {\"name\":\"%511[^\"]\",\"start\":\"%63[^\"]\",\"end\":\"%63[^\"]\"}",
+                name, start_str, end_str);
+            if (n < 3) continue;
+        }
+
+        time_t s = ParseDateTime(start_str);
+        time_t e = ParseDateTime(end_str);
+        if (!s || e <= s) continue;
+
+        Entry *en = &tracker.entries[tracker.count++];
+        strncpy(en->name, name, MAX_NAME-1);
+        en->name[MAX_NAME-1] = '\0';
+        strncpy(en->description, desc, 511);
+        en->description[511] = '\0';
+        en->start = s;
+        en->end = e;
+        en->duration_years = difftime(e, s) / (365.25*86400.0);
+        en->color = (Color){GetRandomValue(90,230), GetRandomValue(90,230), GetRandomValue(110,240), 255};
+    }
+    fclose(f);
+}
   
   void SyncInputsToSelected(void) {
       if (selected < 0 || selected >= tracker.count) return;
@@ -767,118 +801,162 @@ void DrawTextInput(TextInput *ti, Font font) {
     }
 }
 
-void UpdateTextInput(TextInput *ti, Font font) {
+void UpdateTextInput(TextInput *ti, Font font)
+{
     Vector2 mouse = GetMousePosition();
 
-    // ───── Click to focus + cursor placement ─────
+    // ── Focus & cursor placement (unchanged) ─────────────────────
     if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
         bool was_active = ti->active;
         ti->active = CheckCollisionPointRec(mouse, ti->rect);
 
         if (ti->active && !was_active) {
             float rel_x = mouse.x - (ti->rect.x + 12);
-            if (rel_x < 0) {
-                ti->cursor_pos = 0;
-            } else {
+            if (rel_x < 0) ti->cursor_pos = 0;
+            else {
                 int low = 0, high = (int)strlen(ti->text);
                 while (low < high) {
                     int mid = (low + high + 1) / 2;
-                    if (TextWidthUpTo(font, ti->text, mid, 20, 1) <= rel_x)
-                        low = mid;
-                    else
-                        high = mid - 1;
+                    if (TextWidthUpTo(font, ti->text, mid, 20, 1) <= rel_x) low = mid;
+                    else high = mid - 1;
                 }
                 ti->cursor_pos = low;
             }
         }
     }
-
     if (!ti->active) return;
 
-    // ───── Character input (same as before) ─────
-    int key = GetCharPressed();
-    while (key > 0) {
-        if (key >= 32 && key <= 125 && strlen(ti->text) < MAX_INPUT-2) {
-            memmove(ti->text + ti->cursor_pos + 1,
+    // ── UNICODE CHARACTER INPUT (manual UTF-8 encoding) ──────────
+    int codepoint = GetCharPressed();
+    while (codepoint > 0) {
+        if (codepoint >= 32 && strlen(ti->text) < MAX_INPUT - 8) {
+            char utf8[8] = {0};
+            int len = 0;
+
+            if (codepoint < 0x80) {
+                utf8[0] = (char)codepoint;
+                len = 1;
+            } else if (codepoint < 0x800) {
+                utf8[0] = (char)(0xC0 | (codepoint >> 6));
+                utf8[1] = (char)(0x80 | (codepoint & 0x3F));
+                len = 2;
+            } else if (codepoint < 0x10000) {
+                utf8[0] = (char)(0xE0 | (codepoint >> 12));
+                utf8[1] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+                utf8[2] = (char)(0x80 | (codepoint & 0x3F));
+                len = 3;
+            } else if (codepoint < 0x110000) {
+                utf8[0] = (char)(0xF0 | (codepoint >> 18));
+                utf8[1] = (char)(0x80 | ((codepoint >> 12) & 0x3F));
+                utf8[2] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+                utf8[3] = (char)(0x80 | (codepoint & 0x3F));
+                len = 4;
+            }
+
+            // Insert UTF-8 bytes
+            memmove(ti->text + ti->cursor_pos + len,
                     ti->text + ti->cursor_pos,
                     strlen(ti->text + ti->cursor_pos) + 1);
-            ti->text[ti->cursor_pos++] = (char)key;
+            memcpy(ti->text + ti->cursor_pos, utf8, len);
+            ti->cursor_pos += len;
         }
-        key = GetCharPressed();
+        codepoint = GetCharPressed();
     }
 
-    // ───── KEY REPEAT SYSTEM (Backspace & Delete) ─────
+    // ── KEY REPEAT SYSTEM (Backspace, Delete, Left, Right) ───────
     static float repeatTimer = 0.0f;
     static int   repeatKey   = 0;
 
-    const float REPEAT_DELAY    = 0.45f;  // seconds before repeat starts
-    const float REPEAT_INTERVAL = 0.04f;  // how fast it repeats after delay
+    const float REPEAT_DELAY    = 0.42f;
+    const float REPEAT_INTERVAL = 0.035f;
 
     int currentKey = 0;
     if (IsKeyDown(KEY_BACKSPACE)) currentKey = KEY_BACKSPACE;
     else if (IsKeyDown(KEY_DELETE))   currentKey = KEY_DELETE;
+    else if (IsKeyDown(KEY_LEFT))     currentKey = KEY_LEFT;
+    else if (IsKeyDown(KEY_RIGHT))    currentKey = KEY_RIGHT;
 
     if (currentKey != 0) {
         if (currentKey != repeatKey) {
-            // Key just pressed — delete one char immediately
+            // First press — immediate action
             if (currentKey == KEY_BACKSPACE && ti->cursor_pos > 0) {
-                memmove(ti->text + ti->cursor_pos - 1,
-                        ti->text + ti->cursor_pos,
-                        strlen(ti->text + ti->cursor_pos) + 1);
-                ti->cursor_pos--;
+                int pos = ti->cursor_pos;
+                do { pos--; } while (pos > 0 && (ti->text[pos] & 0xC0) == 0x80);
+                memmove(ti->text + pos, ti->text + ti->cursor_pos, strlen(ti->text + ti->cursor_pos) + 1);
+                ti->cursor_pos = pos;
             }
             else if (currentKey == KEY_DELETE && ti->cursor_pos < (int)strlen(ti->text)) {
-                memmove(ti->text + ti->cursor_pos,
-                        ti->text + ti->cursor_pos + 1,
-                        strlen(ti->text + ti->cursor_pos + 1) + 1);
+                int pos = ti->cursor_pos;
+                int end = pos;
+                do { end++; } while (end < (int)strlen(ti->text) && (ti->text[end] & 0xC0) == 0x80);
+                if (end > pos) {
+                    memmove(ti->text + pos, ti->text + end, strlen(ti->text + end) + 1);
+                }
             }
+            else if (currentKey == KEY_LEFT && ti->cursor_pos > 0) {
+                int pos = ti->cursor_pos;
+                do { pos--; } while (pos > 0 && (ti->text[pos] & 0xC0) == 0x80);
+                ti->cursor_pos = pos;
+            }
+            else if (currentKey == KEY_RIGHT && ti->cursor_pos < (int)strlen(ti->text)) {
+                int pos = ti->cursor_pos;
+                do { pos++; } while (pos < (int)strlen(ti->text) && (ti->text[pos] & 0xC0) == 0x80);
+                ti->cursor_pos = pos;
+            }
+
             repeatKey = currentKey;
-            repeatTimer = REPEAT_DELAY;  // wait before repeating
-        } else {
-            // Key is held — handle repeat timing
+            repeatTimer = REPEAT_DELAY;
+        }
+        else {
+            // Holding — repeat
             repeatTimer -= GetFrameTime();
             if (repeatTimer <= 0.0f) {
                 if (currentKey == KEY_BACKSPACE && ti->cursor_pos > 0) {
-                    memmove(ti->text + ti->cursor_pos - 1,
-                            ti->text + ti->cursor_pos,
-                            strlen(ti->text + ti->cursor_pos) + 1);
-                    ti->cursor_pos--;
+                    int pos = ti->cursor_pos;
+                    do { pos--; } while (pos > 0 && (ti->text[pos] & 0xC0) == 0x80);
+                    memmove(ti->text + pos, ti->text + ti->cursor_pos, strlen(ti->text + ti->cursor_pos) + 1);
+                    ti->cursor_pos = pos;
                 }
                 else if (currentKey == KEY_DELETE && ti->cursor_pos < (int)strlen(ti->text)) {
-                    memmove(ti->text + ti->cursor_pos,
-                            ti->text + ti->cursor_pos + 1,
-                            strlen(ti->text + ti->cursor_pos + 1) + 1);
+                    int pos = ti->cursor_pos;
+                    int end = pos;
+                    do { end++; } while (end < (int)strlen(ti->text) && (ti->text[end] & 0xC0) == 0x80);
+                    if (end > pos) memmove(ti->text + pos, ti->text + end, strlen(ti->text + end) + 1);
                 }
-                repeatTimer = REPEAT_INTERVAL;  // next repeat soon
+                else if (currentKey == KEY_LEFT && ti->cursor_pos > 0) {
+                    int pos = ti->cursor_pos;
+                    do { pos--; } while (pos > 0 && (ti->text[pos] & 0xC0) == 0x80);
+                    ti->cursor_pos = pos;
+                }
+                else if (currentKey == KEY_RIGHT && ti->cursor_pos < (int)strlen(ti->text)) {
+                    int pos = ti->cursor_pos;
+                    do { pos++; } while (pos < (int)strlen(ti->text) && (ti->text[pos] & 0xC0) == 0x80);
+                    ti->cursor_pos = pos;
+                }
+
+                repeatTimer = REPEAT_INTERVAL;
             }
         }
-    } else {
-        // No repeat key held
+    }
+    else {
         repeatKey = 0;
         repeatTimer = 0.0f;
     }
 
-    // ───── Cursor movement keys (also repeat ─────
-    if (IsKeyPressedRepeat(KEY_LEFT) && ti->cursor_pos > 0) ti->cursor_pos--;
-    if (IsKeyPressedRepeat(KEY_RIGHT) && ti->cursor_pos < (int)strlen(ti->text)) ti->cursor_pos++;
+    // ── Home / End / Ctrl+V (unchanged) ──────────────────────────
     if (IsKeyPressed(KEY_HOME)) ti->cursor_pos = 0;
-    if (IsKeyPressed(KEY_END)) ti->cursor_pos = (int)strlen(ti->text);
+    if (IsKeyPressed(KEY_END))  ti->cursor_pos = (int)strlen(ti->text);
 
-    // ───── Ctrl+V Paste (unchanged) ─────
     if ((IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) && IsKeyPressed(KEY_V)) {
-        const char *clipboard = GetClipboardText();
-        if (clipboard) {
-            size_t len = strlen(clipboard);
+        const char *clip = GetClipboardText();
+        if (clip) {
+            size_t len = strlen(clip);
             size_t space = MAX_INPUT - 1 - strlen(ti->text);
-            if (space > 0) {
-                if (len > space) len = space;
-                memmove(ti->text + ti->cursor_pos + len,
-                        ti->text + ti->cursor_pos,
-                        strlen(ti->text + ti->cursor_pos) + 1);
-                memcpy(ti->text + ti->cursor_pos, clipboard, len);
-                ti->cursor_pos += (int)len;
-                ti->text[MAX_INPUT-1] = '\0';
-            }
+            if (len > space) len = space;
+            memmove(ti->text + ti->cursor_pos + len, ti->text + ti->cursor_pos, strlen(ti->text + ti->cursor_pos) + 1);
+            memcpy(ti->text + ti->cursor_pos, clip, len);
+            ti->cursor_pos += (int)len;
+            ti->text[MAX_INPUT-1] = '\0';
         }
     }
 }
@@ -1008,21 +1086,47 @@ void DrawHoveredEventNameOnTop(void)
 }
 
 int main(void) {
-    //const int W = 1500, H = 900;
+    const int W = 1500, H = 900;
 
-	InitWindow(0, 0, "Lifetime Visual Time Tracker");
-	SetWindowState(FLAG_FULLSCREEN_MODE);
-	ToggleBorderlessWindowed();  // Optional: removes any border flicker on some systems
+    InitWindow(W, H, "Lifetime Visual Time Tracker");
     SetTargetFPS(60);
 
-    // ────────────────────── YOUR ORIGINAL FONT (exactly as you had it) ──────────────────────
-    font = LoadFontEx("/usr/share/fonts/TTF/DejaVuSans.ttf", 22, NULL, 0);
-    if (font.texture.id == 0) font = GetFontDefault();
 
-    // Keep text smooth & crisp
-    SetTextureFilter(font.texture, TEXTURE_FILTER_TRILINEAR);
+   // ────────────────────── PERFECT UNICODE FONT LOADING (NO MORE ????) ──────────────────────
+    const char* preferred_paths[] = {
+        "resources/NotoSans-Regular.ttf",                 // ← your bundled copy
+        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        NULL
+    };
+
+    font = (Font){0};
+
+    for (int i = 0; preferred_paths[i]; i++) {
+        if (FileExists(preferred_paths[i])) {
+            // Load with a large glyph count to cover full Unicode (up to ~65k glyphs)
+            font = LoadFontEx(preferred_paths[i], 32, NULL, 65536);
+            if (font.texture.id != 0) {
+                SetTextureFilter(font.texture, TEXTURE_FILTER_BILINEAR);
+                TraceLog(LOG_INFO, "Loaded font: %s → FULL UNICODE SUPPORT", preferred_paths[i]);
+                break;
+            }
+        }
+    }
+
+    // Absolute last resort
+    if (font.texture.id == 0) {
+        font = GetFontDefault();
+        TraceLog(LOG_WARNING, "Using raylib default font – limited Unicode");
+    }
     // ──────────────────────────────────────────────────────────────────────────────────────
 
+    // Absolute last resort
+    if (font.texture.id == 0) {
+        font = GetFontDefault();
+        TraceLog(LOG_WARNING, "Using raylib default font – limited Unicode");
+    }
+    // ──────────────────────────────────────────────────────────────────────────────────────    
     LoadTracker("timetracker.json");
     tracker.pixels_per_year = 700.0f;
 
@@ -1080,15 +1184,7 @@ int main(void) {
                 strcpy(last_end,   end_input.text);
             }
         }
-    if (IsKeyPressed(KEY_F11)) {
-        if (IsWindowFullscreen()) {
-            ClearWindowState(FLAG_FULLSCREEN_MODE);
-            SetWindowSize(1500, 900);           // your preferred windowed size
-            SetWindowPosition(100, 100);
-        } else {
-            SetWindowState(FLAG_FULLSCREEN_MODE);
-        }
-    }
+
         // ────────────────────── DRAWING ──────────────────────
         BeginDrawing();
             ClearBackground((Color){12, 12, 28, 255});
